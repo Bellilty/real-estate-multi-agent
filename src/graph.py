@@ -60,7 +60,7 @@ class RealEstateAgentGraph:
         workflow.add_node("router", self._route_intent)
         workflow.add_node("extractor", self._extract_entities)
         workflow.add_node("query", self._execute_query)
-        workflow.add_node("response", self._format_response)
+        workflow.add_node("formatter", self._format_response)
         workflow.add_node("fallback", self._handle_fallback)
         
         # Define edges
@@ -84,13 +84,13 @@ class RealEstateAgentGraph:
             "query",
             self._should_retry_or_respond,
             {
-                "response": "response",
+                "format": "formatter",
                 "fallback": "fallback"
             }
         )
         
-        # From response and fallback to END
-        workflow.add_edge("response", END)
+        # From formatter and fallback to END
+        workflow.add_edge("formatter", END)
         workflow.add_edge("fallback", END)
         
         return workflow.compile()
@@ -210,7 +210,7 @@ Would you like to see the list of available properties?"""
             if "execution failed" in error_msg or "unsupported" in error_msg:
                 return "fallback"
         
-        return "response"
+        return "format"
     
     def run(self, user_query: str) -> str:
         """Run the agent graph with a user query
