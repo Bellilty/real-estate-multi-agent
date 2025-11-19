@@ -1,0 +1,23 @@
+# Core dependencies
+langgraph==0.2.50
+langchain==0.3.13
+langchain-core==0.3.28
+langchain-community==0.3.13
+langchain-huggingface==0.1.2
+
+# Data processing
+polars==1.35.2
+pyarrow==22.0.0
+pandas==2.2.2
+
+# HuggingFace
+huggingface-hub==0.27.1
+transformers==4.48.1
+
+# UI
+streamlit==1.41.1
+
+# Utilities
+python-dotenv==1.0.1
+pydantic==2.10.6
+
