@@ -21,7 +21,7 @@ class AgentState(TypedDict):
     confidence: str
     entities: dict
     query_result: dict
-    response: str
+    final_response: str
     error: str
     iteration: int
 
@@ -151,7 +151,7 @@ class RealEstateAgentGraph:
             state["user_query"]
         )
         
-        state["response"] = response
+        state["final_response"] = response
         print("   ✅ Response generated")
         
         return state
@@ -189,7 +189,7 @@ Could you please rephrase your question or try one of the above request types?""
 
 Would you like to see the list of available properties?"""
         
-        state["response"] = response
+        state["final_response"] = response
         return state
     
     def _should_proceed_to_extraction(self, state: AgentState) -> str:
@@ -233,7 +233,7 @@ Would you like to see the list of available properties?"""
             "confidence": "",
             "entities": {},
             "query_result": {},
-            "response": "",
+            "final_response": "",
             "error": "",
             "iteration": 0
         }
@@ -246,7 +246,7 @@ Would you like to see the list of available properties?"""
             print("✅ Workflow Complete")
             print("="*80 + "\n")
             
-            return final_state["response"]
+            return final_state["final_response"]
             
         except Exception as e:
             print(f"\n❌ Workflow Error: {str(e)}\n")
