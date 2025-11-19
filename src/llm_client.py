@@ -27,7 +27,11 @@ class HuggingFaceLLM(BaseLLM):
     def __init__(self, api_token: str, **kwargs):
         super().__init__(**kwargs)
         self.api_token = api_token
-        self.client = InferenceClient(token=api_token)
+        # Use the new HuggingFace inference endpoint
+        self.client = InferenceClient(
+            model=self.model,
+            token=api_token
+        )
     
     def _call(
         self,
