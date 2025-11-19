@@ -4,7 +4,7 @@ Determines what type of request the user is making
 """
 
 from typing import Dict, Any
-from langchain_core.language_models.llms import LLM
+from langchain_core.language_models.llms import BaseLLM
 from src.llm_client import create_prompt
 
 
@@ -20,7 +20,7 @@ class RouterAgent:
         "unsupported": "Request cannot be handled"
     }
     
-    def __init__(self, llm: LLM):
+    def __init__(self, llm: BaseLLM):
         """Initialize the router agent
         
         Args:

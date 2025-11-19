@@ -3,14 +3,14 @@ Response Agent - Formats query results into natural language responses
 """
 
 from typing import Dict, Any
-from langchain_core.language_models.llms import LLM
+from langchain_core.language_models.llms import BaseLLM
 from src.llm_client import create_prompt
 
 
 class ResponseAgent:
     """Formats data query results into natural language responses"""
     
-    def __init__(self, llm: LLM):
+    def __init__(self, llm: BaseLLM):
         """Initialize the response agent
         
         Args:

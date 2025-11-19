@@ -5,7 +5,7 @@ Orchestrates the multi-agent system for real estate asset management
 
 from typing import TypedDict, Annotated, Any
 from langgraph.graph import StateGraph, END
-from langchain_core.language_models.llms import LLM
+from langchain_core.language_models.llms import BaseLLM
 
 from src.data_loader import RealEstateDataLoader
 from src.agents.router_agent import RouterAgent
@@ -29,7 +29,7 @@ class AgentState(TypedDict):
 class RealEstateAgentGraph:
     """Multi-agent workflow using LangGraph"""
     
-    def __init__(self, llm: LLM, data_loader: RealEstateDataLoader):
+    def __init__(self, llm: BaseLLM, data_loader: RealEstateDataLoader):
         """Initialize the agent graph
         
         Args:
@@ -253,7 +253,7 @@ Would you like to see the list of available properties?"""
             return f"An error occurred while processing your request: {str(e)}"
 
 
-def create_agent_graph(llm: LLM, data_loader: RealEstateDataLoader) -> RealEstateAgentGraph:
+def create_agent_graph(llm: BaseLLM, data_loader: RealEstateDataLoader) -> RealEstateAgentGraph:
     """Factory function to create the agent graph
     
     Args:

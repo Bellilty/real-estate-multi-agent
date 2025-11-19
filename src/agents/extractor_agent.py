@@ -3,14 +3,14 @@ Extractor Agent - Extracts entities and parameters from user queries
 """
 
 from typing import Dict, Any, List
-from langchain_core.language_models.llms import LLM
+from langchain_core.language_models.llms import BaseLLM
 from src.llm_client import create_prompt
 
 
 class ExtractorAgent:
     """Extracts entities like property names, dates, tenants from user queries"""
     
-    def __init__(self, llm: LLM, available_properties: List[str]):
+    def __init__(self, llm: BaseLLM, available_properties: List[str]):
         """Initialize the extractor agent
         
         Args:

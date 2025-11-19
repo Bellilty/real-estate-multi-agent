@@ -102,19 +102,30 @@ def main():
         st.markdown("- **Framework:** LangGraph")
         st.markdown("- **UI:** Streamlit")
     
+    # Initialize session state for selected example
+    if "selected_example" not in st.session_state:
+        st.session_state.selected_example = None
+    
     # Main content
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.subheader("💬 Ask a Question")
         
+        # Use selected example if available
+        default_value = st.session_state.selected_example if st.session_state.selected_example else ""
+        
         # Query input
         user_query = st.text_input(
             "Enter your question:",
+            value=default_value,
             placeholder="e.g., What is the P&L for Building 17 in 2024?",
-            key="user_query",
             label_visibility="collapsed"
         )
+        
+        # Clear selected example after using it
+        if st.session_state.selected_example:
+            st.session_state.selected_example = None
         
         # Submit button
         submit_button = st.button("🚀 Ask", type="primary", use_container_width=True)
@@ -153,7 +164,7 @@ def main():
         
         for example in examples:
             if st.button(f"📝 {example}", key=example, use_container_width=True):
-                st.session_state.user_query = example
+                st.session_state.selected_example = example
                 st.rerun()
     
     # Query history

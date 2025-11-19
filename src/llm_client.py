@@ -6,12 +6,49 @@ Uses Llama 3.2-3B-Instruct for text generation
 import os
 from typing import Optional
 from dotenv import load_dotenv
-from langchain_huggingface import HuggingFaceEndpoint
-from langchain_core.language_models.llms import LLM
+from huggingface_hub import InferenceClient
+from langchain_core.language_models.llms import BaseLLM
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 
 # Load environment variables
 load_dotenv(".env.local")
 load_dotenv()
+
+
+class HuggingFaceLLM(BaseLLM):
+    """Custom LangChain LLM wrapper for HuggingFace InferenceClient"""
+    
+    client: InferenceClient
+    model: str = "meta-llama/Llama-3.2-3B-Instruct"
+    max_tokens: int = 512
+    temperature: float = 0.3
+    
+    def __init__(self, api_token: str, **kwargs):
+        super().__init__(**kwargs)
+        self.client = InferenceClient(token=api_token)
+    
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[list] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs
+    ) -> str:
+        """Call the HuggingFace API"""
+        try:
+            response = self.client.chat_completion(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"Error: {str(e)}"
+    
+    @property
+    def _llm_type(self) -> str:
+        return "huggingface"
 
 
 class LLMClient:
@@ -35,21 +72,14 @@ class LLMClient:
         
         self.llm = self._initialize_llm()
     
-    def _initialize_llm(self) -> LLM:
+    def _initialize_llm(self) -> BaseLLM:
         """Initialize the HuggingFace LLM"""
-        llm = HuggingFaceEndpoint(
-            repo_id=self.MODEL_NAME,
-            huggingfacehub_api_token=self.api_token,
-            temperature=0.3,  # Lower temperature for more deterministic outputs
-            max_new_tokens=512,
-            top_p=0.95,
-            repetition_penalty=1.1,
-        )
+        llm = HuggingFaceLLM(api_token=self.api_token)
         
         print(f"✅ Initialized LLM: {self.MODEL_NAME}")
         return llm
     
-    def get_llm(self) -> LLM:
+    def get_llm(self) -> BaseLLM:
         """Get the initialized LLM instance"""
         return self.llm
     
