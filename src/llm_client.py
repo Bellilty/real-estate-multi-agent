@@ -18,13 +18,15 @@ load_dotenv()
 class HuggingFaceLLM(BaseLLM):
     """Custom LangChain LLM wrapper for HuggingFace InferenceClient"""
     
-    client: InferenceClient
+    client: InferenceClient = None
     model: str = "meta-llama/Llama-3.2-3B-Instruct"
     max_tokens: int = 512
     temperature: float = 0.3
+    api_token: str = ""
     
     def __init__(self, api_token: str, **kwargs):
         super().__init__(**kwargs)
+        self.api_token = api_token
         self.client = InferenceClient(token=api_token)
     
     def _call(
@@ -45,6 +47,17 @@ class HuggingFaceLLM(BaseLLM):
             return response.choices[0].message.content
         except Exception as e:
             return f"Error: {str(e)}"
+    
+    def _generate(self, prompts, stop=None, run_manager=None, **kwargs):
+        """Generate method required by BaseLLM"""
+        from langchain_core.outputs import LLMResult, Generation
+        
+        generations = []
+        for prompt in prompts:
+            text = self._call(prompt, stop=stop, run_manager=run_manager, **kwargs)
+            generations.append([Generation(text=text)])
+        
+        return LLMResult(generations=generations)
     
     @property
     def _llm_type(self) -> str:
