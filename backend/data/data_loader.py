@@ -8,6 +8,31 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 
+def _safe_string_value(value: str) -> str:
+    """
+    Sanitize string value for safe querying
+    
+    Implements SQL injection protection by escaping special characters
+    Note: Polars is generally safe from SQL injection since it's not SQL,
+    but we apply similar principles for consistency
+    """
+    if not isinstance(value, str):
+        return str(value)
+    
+    # Escape single quotes (SQL injection protection)
+    return value.replace("'", "''")
+
+
+def _case_insensitive_match(column: pl.Expr, value: str) -> pl.Expr:
+    """
+    Create case-insensitive match expression
+    
+    Equivalent to SQL: WHERE LOWER(column) = LOWER('value')
+    """
+    safe_value = _safe_string_value(value)
+    return column.cast(pl.Utf8).str.to_lowercase() == safe_value.lower()
+
+
 class RealEstateDataLoader:
     """Loads and provides query interface for real estate data"""
     
@@ -61,7 +86,7 @@ class RealEstateDataLoader:
         """Get details for a specific property
         
         Args:
-            property_name: Name of the property
+            property_name: Name of the property (case-insensitive)
             
         Returns:
             Dictionary with property details
@@ -69,8 +94,9 @@ class RealEstateDataLoader:
         if self.df is None:
             return {}
         
+        # Use case-insensitive matching
         property_data = self.df.filter(
-            pl.col("property_name") == property_name
+            _case_insensitive_match(pl.col("property_name"), property_name)
         )
         
         if len(property_data) == 0:
@@ -133,7 +159,10 @@ class RealEstateDataLoader:
         if month:
             filtered_df = filtered_df.filter(pl.col("month") == month)
         if property_name:
-            filtered_df = filtered_df.filter(pl.col("property_name") == property_name)
+            # Use case-insensitive matching for property names
+            filtered_df = filtered_df.filter(
+                _case_insensitive_match(pl.col("property_name"), property_name)
+            )
         
         if len(filtered_df) == 0:
             return {"error": "No data found for the specified filters"}
@@ -203,6 +232,29 @@ class RealEstateDataLoader:
             }
         }
     
+    def get_dataset_stats(self) -> Dict[str, Any]:
+        """Get dataset statistics for UI display"""
+        if self.df is None:
+            return {}
+        
+        # Get unique months (periods)
+        periods = (self.df
+            .select("month")
+            .unique()
+            .sort("month")
+            .drop_nulls()
+            .to_series()
+            .to_list()
+        )
+        
+        return {
+            "total_records": len(self.df),
+            "properties": self.get_properties(),
+            "tenants": self.get_tenants(),
+            "years": self.df["year"].unique().sort().to_list(),
+            "period_range": [periods[0], periods[-1]] if periods else ["", ""]
+        }
+    
     def get_data_summary(self) -> Dict[str, Any]:
         """Get overall data summary"""
         if self.df is None:
@@ -219,6 +271,129 @@ class RealEstateDataLoader:
             },
             "total_revenue": round(self.df.filter(pl.col("ledger_type") == "revenue")["profit"].sum(), 2),
             "total_expenses": round(abs(self.df.filter(pl.col("ledger_type") == "expenses")["profit"].sum()), 2)
+        }
+    
+    def validate_entities(self, entities: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate all entities against the dataset
+        
+        Returns a dict with:
+        - valid: bool (True if all entities are valid)
+        - invalid_entities: dict of {entity_type: [invalid_values]}
+        - suggestions: dict of {entity_type: [available_values]}
+        """
+        if self.df is None:
+            return {"valid": False, "error": "Dataset not loaded"}
+        
+        invalid_entities = {}
+        suggestions = {}
+        
+        # Validate property_name (support both "property" and "properties")
+        property_to_check = None
+        if "property" in entities and entities["property"]:
+            property_to_check = entities["property"]
+        elif "properties" in entities and entities["properties"]:
+            # Handle list of properties
+            if isinstance(entities["properties"], list):
+                property_to_check = entities["properties"]
+            else:
+                property_to_check = [entities["properties"]]
+        
+        if property_to_check:
+            available_properties = self.get_properties()
+            invalid_props = []
+            
+            # Check if it's a list or single property
+            props_list = property_to_check if isinstance(property_to_check, list) else [property_to_check]
+            
+            for prop in props_list:
+                # Skip "all", "PropCo" (portfolio-level aliases)
+                if prop and prop.lower() not in ["all", "propco"] and prop not in available_properties:
+                    invalid_props.append(prop)
+            
+            if invalid_props:
+                invalid_entities["property"] = invalid_props
+                suggestions["property"] = available_properties
+        
+        # Validate tenant_name (support both "tenant" and "tenants")
+        tenant_to_check = None
+        if "tenant" in entities and entities["tenant"]:
+            tenant_to_check = entities["tenant"]
+        elif "tenants" in entities and entities["tenants"]:
+            # Handle list of tenants
+            if isinstance(entities["tenants"], list):
+                tenant_to_check = entities["tenants"]
+            else:
+                tenant_to_check = [entities["tenants"]]
+        
+        if tenant_to_check:
+            available_tenants = self.get_tenants()
+            invalid_tenants = []
+            
+            # Check if it's a list or single tenant
+            tenants_list = tenant_to_check if isinstance(tenant_to_check, list) else [tenant_to_check]
+            
+            for tenant in tenants_list:
+                if tenant and tenant not in available_tenants:
+                    invalid_tenants.append(tenant)
+            
+            if invalid_tenants:
+                invalid_entities["tenant"] = invalid_tenants
+                suggestions["tenant"] = available_tenants
+        
+        # Validate year
+        if "year" in entities and entities["year"]:
+            available_years = self.df["year"].unique().drop_nulls().to_list()
+            if entities["year"] not in available_years:
+                invalid_entities["year"] = [entities["year"]]
+                suggestions["year"] = available_years
+        
+        # Validate quarter
+        if "quarter" in entities and entities["quarter"]:
+            quarter = entities["quarter"]
+            year = entities.get("year")
+            
+            # If quarter is just "Q1" but we have year, build full quarter
+            if quarter and year and quarter.upper() in ["Q1", "Q2", "Q3", "Q4"]:
+                quarter = f"{year}-{quarter.upper()}"
+            
+            available_quarters = self.df["quarter"].unique().drop_nulls().to_list()
+            if quarter not in available_quarters:
+                invalid_entities["quarter"] = [quarter]
+                suggestions["quarter"] = sorted(available_quarters)
+        
+        # Validate month
+        if "month" in entities and entities["month"]:
+            available_months = self.df["month"].unique().drop_nulls().to_list()
+            if entities["month"] not in available_months:
+                invalid_entities["month"] = [entities["month"]]
+                suggestions["month"] = sorted(available_months)
+        
+        # Validate ledger_type
+        if "ledger_type" in entities and entities["ledger_type"]:
+            available_types = self.df["ledger_type"].unique().drop_nulls().to_list()
+            if entities["ledger_type"] not in available_types:
+                invalid_entities["ledger_type"] = [entities["ledger_type"]]
+                suggestions["ledger_type"] = available_types
+        
+        # Validate ledger_group
+        if "ledger_group" in entities and entities["ledger_group"]:
+            available_groups = self.df["ledger_group"].unique().drop_nulls().to_list()
+            if entities["ledger_group"] not in available_groups:
+                invalid_entities["ledger_group"] = [entities["ledger_group"]]
+                suggestions["ledger_group"] = available_groups
+        
+        # Validate ledger_category
+        if "ledger_category" in entities and entities["ledger_category"]:
+            available_categories = self.df["ledger_category"].unique().drop_nulls().to_list()
+            if entities["ledger_category"] not in available_categories:
+                invalid_entities["ledger_category"] = [entities["ledger_category"]]
+                suggestions["ledger_category"] = available_categories
+        
+        return {
+            "valid": len(invalid_entities) == 0,
+            "invalid_entities": invalid_entities,
+            "suggestions": suggestions
         }
 
 

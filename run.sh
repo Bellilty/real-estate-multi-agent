@@ -33,5 +33,5 @@ fi
 echo "🚀 Starting Streamlit application..."
 echo ""
 
-streamlit run app.py
+streamlit run frontend/streamlit_app.py
 
