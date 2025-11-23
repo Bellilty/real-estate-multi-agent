@@ -1,6 +1,5 @@
 """
-🧠 INTELLIGENT MULTI-AGENT ORCHESTRATOR
-Production version with all agents integrated
+INTELLIGENT MULTI-AGENT ORCHESTRATOR
 """
 
 from langgraph.graph import StateGraph, END
@@ -14,7 +13,7 @@ from backend.agents.extractor import EntityExtractor
 from backend.agents.naturaldate_agent import NaturalDateAgent
 from backend.agents.validation_agent import ValidationAgent
 from backend.agents.disambiguation_agent import DisambiguationAgent
-from backend.agents.query import EnhancedQueryAgent
+from backend.agents.query import QueryAgent  # ✅ use clean QueryAgent
 from backend.agents.formatter import ResponseFormatter
 from backend.utils.tracking import ChainOfThoughtTracker
 
@@ -29,6 +28,7 @@ class IntelligentWorkflowState(TypedDict):
     # Follow-up resolution
     is_followup: bool
     updated_query: str
+    clear_timeframes: bool
     
     # Intent & Entities
     intent: str
@@ -105,7 +105,7 @@ class RealEstateOrchestrator:
         self.naturaldate_agent = NaturalDateAgent()
         self.validation_agent = ValidationAgent(data_loader)
         self.disambiguation_agent = DisambiguationAgent(data_loader)
-        self.query_agent = EnhancedQueryAgent(data_loader)
+        self.query_agent = QueryAgent(data_loader)  # ✅ clean query layer
         self.formatter = ResponseFormatter(llm)
         
         # Build workflow
@@ -185,6 +185,12 @@ class RealEstateOrchestrator:
         
         state["is_followup"] = result["is_followup"]
         state["updated_query"] = result["updated_query"]
+        
+        # Check if we need to clear timeframes (for "overall" queries)
+        context_used = result.get("context_used", {})
+        if context_used.get("clear_timeframes"):
+            state["clear_timeframes"] = True
+        
         state["agent_path"].append("FollowUpResolver")
         
         # Track this step
@@ -192,7 +198,10 @@ class RealEstateOrchestrator:
             agent="FollowUpResolver",
             action="resolve_followup",
             input_data={"query": state["user_query"]},
-            output_data={"is_followup": result["is_followup"]},
+            output_data={
+                "is_followup": result["is_followup"],
+                "clear_timeframes": state.get("clear_timeframes", False)
+            },
             reasoning=result.get("notes", ""),
             duration_ms=result["duration_ms"],
             success=result["status"] == "ok"
@@ -215,7 +224,10 @@ class RealEstateOrchestrator:
             agent="Router",
             action="classify_intent",
             input_data={"query": query_to_route},
-            output_data={"intent": result["intent"], "confidence": result["confidence"]},
+            output_data={
+                "intent": result["intent"],
+                "confidence": result["confidence"]
+            },
             reasoning=result.get("reason", ""),
             duration_ms=result.get("duration_ms", 0),
             success=True
@@ -234,6 +246,17 @@ class RealEstateOrchestrator:
         )
         
         state["entities"] = result.get("entities", {})
+        # Store raw query for analytics queries that need it
+        if state["intent"] == "analytics_query":
+            state["entities"]["raw_query"] = query_to_extract
+        
+        # If clear_timeframes flag is set, remove all time-related entities
+        if state.get("clear_timeframes"):
+            state["entities"].pop("year", None)
+            state["entities"].pop("quarter", None)
+            state["entities"].pop("month", None)
+            state["entities"].pop("periods", None)
+        
         state["agent_path"].append("Extractor")
         
         # Track this step
@@ -242,7 +265,10 @@ class RealEstateOrchestrator:
             action="extract_entities",
             input_data={"query": query_to_extract, "intent": state["intent"]},
             output_data=result.get("entities", {}),
-            reasoning=f"Extracted entities for {state['intent']}",
+            reasoning=(
+                f"Extracted entities for {state['intent']}"
+                + (" (timeframes cleared for overall query)" if state.get("clear_timeframes") else "")
+            ),
             duration_ms=result.get("duration_ms", 0),
             success=result["success"]
         )
@@ -259,6 +285,20 @@ class RealEstateOrchestrator:
         )
         
         state["entities"] = result["entities"]
+        
+        # For temporal_comparison: Update periods with normalized quarters
+        if state.get("intent") == "temporal_comparison":
+            if isinstance(state["entities"].get("quarter"), list):
+                # Quarters are now normalized to "2024-Q1" format
+                state["entities"]["periods"] = state["entities"]["quarter"]
+        
+        # If clear_timeframes flag is set, remove time entities again
+        if state.get("clear_timeframes"):
+            state["entities"].pop("year", None)
+            state["entities"].pop("quarter", None)
+            state["entities"].pop("month", None)
+            state["entities"].pop("periods", None)
+        
         state["agent_path"].append("NaturalDateAgent")
         
         # Track this step
@@ -267,7 +307,9 @@ class RealEstateOrchestrator:
             action="parse_dates",
             input_data={"entities": state["entities"]},
             output_data={"normalized": result["entities"]},
-            reasoning=result.get("notes", ""),
+            reasoning=result.get("notes", "") + (
+                " (timeframes cleared for overall query)" if state.get("clear_timeframes") else ""
+            ),
             duration_ms=result["duration_ms"],
             success=result["status"] == "ok"
         )
@@ -280,6 +322,9 @@ class RealEstateOrchestrator:
             state["intent"],
             state["entities"]
         )
+        
+        # ✅ use validated entities for QueryAgent
+        state["entities"] = result.get("entities", state["entities"])
         
         state["validation_status"] = result["status"]
         state["missing_fields"] = result.get("missing_fields", [])
@@ -329,21 +374,39 @@ class RealEstateOrchestrator:
         """Node 7: Handle clarification requests"""
         state["clarifications_requested"] += 1
         
-        clarification_parts = []
-        if state.get("missing_fields"):
-            missing = ", ".join(state["missing_fields"])
-            clarification_parts.append(f"Missing information: {missing}")
+        # Build detailed clarification message with available options
+        clarification_parts: List[str] = []
+        invalid_entities: Dict[str, Any] = {}
+        suggestions: Dict[str, Any] = {}
         
+        # Parse missing fields to extract entity names
+        missing_fields = state.get("missing_fields") or []
+        if missing_fields:
+            for field in missing_fields:
+                if "property:" in field:
+                    prop_name = field.replace("property:", "").strip()
+                    invalid_entities.setdefault("property", []).append(prop_name)
+                    suggestions["property"] = self.data_loader.get_properties()[:10]
+                elif "tenant:" in field:
+                    tenant_name = field.replace("tenant:", "").strip()
+                    invalid_entities.setdefault("tenant", []).append(tenant_name)
+                    suggestions["tenant"] = self.data_loader.get_tenants()[:10]
+                else:
+                    clarification_parts.append(f"Missing: {field}")
+        
+        # Handle disambiguation results
         disambiguation_result = state.get("disambiguation_result", {})
         if disambiguation_result.get("clarification_message"):
             clarification_parts.append(disambiguation_result["clarification_message"])
         
-        if not clarification_parts:
+        if not clarification_parts and not invalid_entities:
             clarification_parts.append("I need more information to process your request.")
         
         state["query_result"] = {
             "error": "clarification_needed",
-            "clarification_message": " ".join(clarification_parts),
+            "clarification_message": " ".join(clarification_parts) if clarification_parts else "",
+            "invalid_entities": invalid_entities,
+            "suggestions": suggestions,
             "missing_fields": state.get("missing_fields", []),
             "ambiguous_entities": state.get("ambiguous_entities", {})
         }
@@ -365,11 +428,22 @@ class RealEstateOrchestrator:
     
     def _query_node(self, state: IntelligentWorkflowState) -> IntelligentWorkflowState:
         """Node 8: Execute query"""
-        result, duration_ms = self.query_agent.execute_query(
+        # Add user query to entities for analytics queries
+        entities = state["entities"].copy()
+        if state["intent"] == "analytics_query":
+            entities["raw_query"] = state["updated_query"] if state["is_followup"] else state["user_query"]
+        
+        # ✅ QueryAgent.run(intent, entities) → dict (includes duration_ms)
+        result = self.query_agent.run(
             state["intent"],
-            state["entities"]
+            entities
         )
         
+        # Include raw_query in result for analytics queries (needed by formatter)
+        if state["intent"] == "analytics_query" and "raw_query" in entities:
+            result["raw_query"] = entities["raw_query"]
+        
+        duration_ms = result.get("duration_ms", 0)
         state["query_result"] = result
         state["agent_path"].append("QueryAgent")
         
@@ -428,17 +502,35 @@ class RealEstateOrchestrator:
         print(f"\n[ORCHESTRATOR] ==== New query received ====")
         print(f"[ORCHESTRATOR] User query: {user_query}")
         
+        # Handle empty query
+        if not user_query or not user_query.strip():
+            error_response = "Please provide a valid query. I can help you with P&L calculations, property comparisons, and more."
+            self.current_tracker = ChainOfThoughtTracker()
+            self.current_tracker.start_tracking()
+            self.current_tracker.add_step(
+                agent="Orchestrator",
+                action="empty_query_handling",
+                input_data={"query": user_query},
+                output_data={"error": "Empty query"},
+                reasoning="Query was empty or whitespace only",
+                duration_ms=0,
+                success=False,
+                error="Empty query"
+            )
+            return error_response, self.current_tracker
+        
         # Initialize tracker
         self.current_tracker = ChainOfThoughtTracker()
         self.current_tracker.start_tracking()
         
         # Prepare initial state
-        initial_state = {
+        initial_state: IntelligentWorkflowState = {
             "user_query": user_query,
             "original_query": user_query,
             "chat_history": chat_history or [],
             "is_followup": False,
             "updated_query": user_query,
+            "clear_timeframes": False,       # ✅ init flag
             "intent": "",
             "confidence": "",
             "entities": {},
@@ -464,8 +556,9 @@ class RealEstateOrchestrator:
             print(f"\n[ORCHESTRATOR] ---- Final state ----")
             print(f"[ORCHESTRATOR] Intent: {final_state.get('intent')}, confidence: {final_state.get('confidence')}")
             print(f"[ORCHESTRATOR] Entities: {final_state.get('entities')}")
-            print(f"[ORCHESTRATOR] Agent Path: {' → '.join(final_state.get('agent_path', []))}")
-            print(f"[ORCHESTRATOR] Final response: {response[:100]}...")
+            agent_path = final_state.get('agent_path') or []
+            print(f"[ORCHESTRATOR] Agent Path: {' → '.join(agent_path) if agent_path else 'None'}")
+            print(f"[ORCHESTRATOR] Final response: {response[:100] if response else 'None'}...")
             print(f"[ORCHESTRATOR] ==============================\n")
             
             return response, self.current_tracker

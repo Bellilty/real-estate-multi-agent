@@ -1,189 +1,169 @@
 """
-Simplified Prompts for Multi-Agent System
-Focus: General instructions instead of hardcoded examples
-Let the LLM do the work!
+Robust Prompt Templates for Multi-Agent System
+Strict JSON rules + analytics_query support
 """
 
 from typing import List, Dict, Any
 
 
 class PromptTemplates:
-    """Simplified, generalized prompts for all agents"""
-    
+    """Prompt templates for Router, Extractor, Formatter"""
+
+    # ------------------------------------------------------------------
+    # ROUTER PROMPT
+    # ------------------------------------------------------------------
     @staticmethod
     def router_intent_classification(user_query: str) -> str:
-        """Router: Classify intent with general instructions"""
-        return f"""You are a ROUTER agent in a real estate assistant system.
+        return f"""
+You are the ROUTER agent of a real estate multi-agent system.
 
-MISSION: Classify the user's intent into ONE category.
+Your job: classify the user's intent INTO EXACTLY ONE CATEGORY.
 
 AVAILABLE INTENTS:
-1. temporal_comparison - PRIORITY: User compares SAME property across DIFFERENT time periods (must have "compare", "between", "vs", "versus")
-2. property_comparison - User wants to compare DIFFERENT properties
-3. multi_entity_query - User asks for MULTIPLE separate pieces of information (with AND/ALSO)
-4. pl_calculation - User wants P&L calculation for a SINGLE entity/timeframe
-5. property_details - User wants details about ONE property
-6. tenant_info - User wants tenant information
-7. general_query - General questions about real estate
-8. unsupported - Cannot be handled
+1. temporal_comparison   → Compare SAME property across DIFFERENT time periods.
+2. property_comparison   → Compare DIFFERENT properties.
+3. multi_entity_query    → Multiple requests combined (AND / ALSO).
+4. pl_calculation        → Profit, Loss, P&L for ONE entity/timeframe.
+5. property_details      → Information about ONE property.
+6. tenant_info           → Information about tenants / occupancy.
+7. analytics_query       → Requests for: list, all items, max, min, top, bottom,
+                           rankings, sorting, aggregations (sum, average).
+8. general_query         → Real estate related but not fitting above.
+9. unsupported           → Cannot be handled.
 
-CLASSIFICATION RULES (Priority Order - CHECK IN THIS EXACT ORDER):
+INTENT DECISION RULES (IN THIS ORDER):
 
-Step 1: Check if TEMPORAL_COMPARISON
-   - Does query mention ONE property AND TWO+ time periods with comparison words?
-   - Keywords: "compare", "between", "vs", "versus" + time words (2024, 2025, Q1, Q2, etc.)
-   - Example: "Compare Building 180 between 2024 and 2025" → temporal_comparison ✓
-   - Example: "Building 180 profit in 2024 vs 2025" → temporal_comparison ✓
-   - If YES → temporal_comparison
+1. TEMPORAL_COMPARISON
+   - MUST contain: one property + at least two time periods + comparison word.
+   - Keywords: compare, between, vs, versus.
 
-Step 2: Check if MULTI_ENTITY_QUERY
-   - Does query have "AND also" or "and also" with DIFFERENT entities/properties?
-   - Example: "PropCo in Q1 AND Building 180 in Dec" → multi_entity_query ✓
-   - If YES → multi_entity_query
+2. MULTI_ENTITY_QUERY
+   - Query requests 2+ different things (AND / ALSO).
+   - Example: "PropCo in Q1 AND Building 180 in Dec".
 
-Step 3: Check if PROPERTY_COMPARISON
-   - Does query compare TWO+ DIFFERENT properties?
-   - Example: "Compare Building 17 to Building 140" → property_comparison ✓
-   - If YES → property_comparison
+3. PROPERTY_COMPARISON
+   - Comparing different properties.
 
-Step 4: Other intents (if none of above match)
-   - If asking for P&L, profit, loss, revenue, expenses (single entity, single timeframe) → pl_calculation
-   - If asking about tenants or occupancy → tenant_info
-   - If asking about property details → property_details
+4. ANALYTICS_QUERY
+   - User asks for:
+     - "list all ...", "give me all ...", "show all ..." (WITHOUT specific timeframe)
+     - top / bottom / max / min / highest / lowest / most / least (even WITH timeframe)
+     - "highest expense category", "most profit", "which property made the most"
+     - any aggregation: sum, average, count
+   - Example: "List all tenants", "Give me the highest rent", "Which property made the most profit in 2024?", "highest expense category in 2024".
+   - Analytics queries ask for RANKING, COMPARISON, or AGGREGATION across multiple entities.
+   - NOT analytics_query if query asks for revenue/expenses/P&L for a SINGLE specific entity/timeframe (e.g., "What is the revenue for Building X in 2024").
 
-IMPORTANT FOR FOLLOW-UPS:
-- "And in 2025?" → pl_calculation (NOT temporal_comparison)
-- "What about 2025?" → pl_calculation (NOT temporal_comparison)
+5. P&L (pl_calculation)
+   - profit, loss, P&L, revenue, expenses for a specific entity/timeframe.
+   - "What is the revenue for all properties in Q1 2025?" → pl_calculation (has timeframe Q1 2025)
+   - "Revenue for Building X in 2024" → pl_calculation
+   - "What is the P&L for Building 180 in 2025?" → pl_calculation (follow-up enriched with property + year)
+   - "All properties" can be treated as PropCo (portfolio-level).
+   - If query mentions a property AND a year/quarter/month → pl_calculation (even if query is short like "And in 2025?")
 
-EXAMPLES:
-- "Compare Building 180 between 2024 and 2025" → temporal_comparison
-- "How did Building 17 perform in Q1 vs Q2?" → temporal_comparison
-- "Building 140 profit in 2024 vs 2025" → temporal_comparison
-- "What is the P&L for Building 180 in 2024?" → pl_calculation
-- "PropCo in Q1 AND Building 180 in Dec" → multi_entity_query
+6. PROPERTY_DETAILS
+7. TENANT_INFO
+8. GENERAL_QUERY
 
-USER QUERY: "{user_query}"
+USER QUERY:
+"{user_query}"
 
-Respond EXACTLY as JSON:
+Respond ONLY with a JSON object:
 {{
-    "intent": "pl_calculation",
-    "confidence": "high",
-    "reason": "Brief explanation"
+  "intent": "...",
+  "confidence": "high|medium|low",
+  "reason": "short explanation"
 }}
 """
 
+    # ------------------------------------------------------------------
+    # EXTRACTOR PROMPT
+    # ------------------------------------------------------------------
     @staticmethod
     def extractor_entities(user_query: str, intent: str, available_properties: List[str]) -> str:
-        """Extractor: Extract ALL entities as JSON"""
         props_sample = ", ".join(available_properties[:5]) + ", ..."
-        
-        return f"""You are an EXTRACTOR agent in a real estate assistant system.
 
-MISSION: Extract ALL entities mentioned in the user query EXACTLY as written.
+        return f"""
+You are the EXTRACTOR agent.
 
-CRITICAL RULES:
-1. Extract entities EVEN IF they might not exist in the dataset
-2. Do NOT validate - validation happens later
-3. Extract EXACTLY as mentioned (preserve capitalization, numbers, etc.)
-4. **IMPORTANT**: If the query is a follow-up (e.g., "And in 2025?", "What about Building 140?"),
-   you MUST INFER the missing context from the conversation history that will be provided.
-5. **FOR MULTI-ENTITY QUERIES**: If query has "AND also" with DIFFERENT timeframes, 
-   extract the FIRST entity/timeframe mentioned. The query agent will handle splitting.
+MISSION:
+Extract ALL entities mentioned in the user query EXACTLY AS WRITTEN.
+Do NOT validate. Extraction only.
 
-**SPECIAL RULE FOR TEMPORAL_COMPARISON:**
-- If intent is "temporal_comparison", you MUST extract ALL time periods mentioned
-- Example: "Building 180 between 2024 and 2025" → year: ["2024", "2025"] (LIST!)
-- Example: "Building 17 in Q1 vs Q2" → quarter: ["Q1", "Q2"] (LIST!)
+RULES:
+1. NEVER hallucinate entities.
+2. Preserve original case, numbers, formatting.
+3. For follow-ups: you MAY use chat history context (provided separately).
+4. Extract relative dates:
+   - "this year" → year: "this year"
+   - "current year" → year: "current year"
+   - "last year" → year: "last year"
+5. For temporal_comparison:
+   - If multiple years/quarters/months → RETURN LISTS, e.g. ["2024","2025"].
+6. For analytics_query:
+   - Extract filters if mentioned (e.g., property, tenant, year).
+   - If query is generic ("list all properties"), return null for filters.
+7. For tenant_info:
+   - If query asks for "tenants FOR Building X" → extract property, NOT tenant.
+   - If query asks for "properties OF Tenant X" → extract tenant.
 
-AVAILABLE PROPERTIES (for reference only): {props_sample}
+AVAILABLE PROPERTIES (REFERENCE ONLY): {props_sample}
 
-ENTITIES TO EXTRACT:
-- properties: List of property names/buildings mentioned
-- year: Year OR list of years (for temporal_comparison) - "2024" OR ["2024", "2025"]
-- quarter: Quarter OR list of quarters (for temporal_comparison) - "Q1" OR ["Q1", "Q2"]
-- month: Month OR list of months (for temporal_comparison) - "M01" OR ["M01", "M12"]
-- tenants: List of tenant names mentioned or null
-
-INTENT: {intent}
 USER QUERY: "{user_query}"
+INTENT: {intent}
 
-EXAMPLES:
-Query: "Compare Building 17 to Building 1"
-→ {{"properties": ["Building 17", "Building 1"], "year": null, "quarter": null, "month": null, "tenants": null}}
-
-Query: "What is the P&L for Building 180 in 2024?"
-→ {{"properties": ["Building 180"], "year": "2024", "quarter": null, "month": null, "tenants": null}}
-
-Query: "Compare Building 180 between 2024 and 2025" (temporal_comparison!)
-→ {{"properties": ["Building 180"], "year": ["2024", "2025"], "quarter": null, "month": null, "tenants": null}}
-
-Query: "Building 17 in Q1 vs Q2" (temporal_comparison!)
-→ {{"properties": ["Building 17"], "year": null, "quarter": ["Q1", "Q2"], "month": null, "tenants": null}}
-
-Follow-up: "And in 2025?" (after asking about Building 180 in 2024)
-→ {{"properties": ["Building 180"], "year": "2025", "quarter": null, "month": null, "tenants": null}}
-
-Query: "PropCo in Q1 2025"
-→ {{"properties": ["PropCo"], "year": "2025", "quarter": "Q1", "month": null, "tenants": null}}
-
-Respond EXACTLY as JSON (no other text):
+Return ONLY JSON:
 {{
-    "properties": [...] or null,
-    "year": "..." or ["...", "..."] or null,
-    "quarter": "..." or ["...", "..."] or null,
-    "month": "..." or ["...", "..."] or null,
-    "tenants": [...] or null
+  "properties": [... or null],
+  "year": "...", ["...", "..."] or null,
+  "quarter": "...", ["...", "..."] or null,
+  "month": "...", ["...", "..."] or null,
+  "tenants": [... or null]
 }}
-
-NOTE: For temporal_comparison, use LISTS for time periods (year/quarter/month)!
 """
 
+    # ------------------------------------------------------------------
+    # FORMATTER PROMPT
+    # ------------------------------------------------------------------
     @staticmethod
     def formatter_response(user_query: str, intent: str, query_result: Dict[str, Any]) -> str:
-        """Formatter: Generate concise natural language response"""
-        return f"""You are a FORMATTER agent in a real estate assistant system.
+        return f"""
+You are the FORMATTER agent.
 
-MISSION: Generate a clear, concise answer based STRICTLY on the data provided.
+Your job: produce a SHORT, CLEAR natural language answer
+STRICTLY based on the data provided.
 
-CRITICAL RULES:
-1. Answer ONLY what was asked (no extra information)
-2. Use PLAIN TEXT only (no markdown, no formatting symbols)
-3. Include numbers with $ symbol (e.g., $123,456.78)
-4. Keep it SHORT (2-4 sentences maximum)
-5. Do NOT invent numbers or properties not in the data
-
-FORMAT STYLE:
-- P&L queries: "The total P&L for Building 17 is $X. Revenue was $Y and expenses were $Z."
-- Comparisons: "Building A has net profit of $X while Building B has $Y. Building A performs better by $Z."
-- Property details: "Building 17 is occupied by 3 tenants."
-- Errors: "I couldn't find Building X. Available properties are: A, B, C."
+RULES:
+1. Plain text only (NO markdown).
+2. 2–4 sentences max.
+3. NEVER invent data or properties.
+4. For analytics:
+   - If listing: return clean comma-separated values.
+   - If max/min: say which value and which entity.
 
 USER QUERY: "{user_query}"
 INTENT: {intent}
-DATA RETRIEVED: {query_result}
+DATA: {query_result}
 
-Generate your response (plain text only, no markdown):
+Write the final answer below:
 """
 
+    # ------------------------------------------------------------------
+    # CHAT HISTORY ADDER
+    # ------------------------------------------------------------------
     @staticmethod
-    def add_chat_context(prompt: str, chat_history: list) -> str:
-        """Add chat history context to any prompt"""
-        if not chat_history or len(chat_history) == 0:
+    def add_chat_context(prompt: str, chat_history: List[Dict[str, Any]] = None) -> str:
+        if not chat_history:
             return prompt
-        
-        context = "\n\n=== CONVERSATION HISTORY ===\n"
-        context += "Use this context ONLY if the current query is a follow-up or reference (e.g., 'And in 2025?', 'What about that property?').\n"
-        context += "If the current query is COMPLETE and STANDALONE, extract ONLY from the query itself, NOT from history.\n\n"
-        
-        # Include last 6 messages (3 exchanges)
-        for msg in chat_history[-6:]:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            content = msg["content"][:200]  # Truncate long messages
-            if len(msg["content"]) > 200:
-                content += "..."
-            context += f"{role}: {content}\n"
-        context += "\n=== END HISTORY ===\n"
-        context += "\nIMPORTANT: If the current query refers to 'it', 'that', 'same property', etc., extract the entity from the conversation history above.\n"
-        
-        return prompt + context
 
+        context = "\n\n=== CHAT HISTORY (use ONLY for references like 'it', 'that', 'same property') ===\n"
+        for msg in (chat_history[-6:] if chat_history else []):
+            if msg and isinstance(msg, dict):
+                if "user" in msg:
+                    context += f"User: {msg['user']}\n"
+                if "assistant" in msg:
+                    context += f"Assistant: {msg['assistant'][:200]}\n"
+
+        context += "\n=== END HISTORY ===\n"
+        return prompt + context

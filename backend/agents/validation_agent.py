@@ -1,208 +1,232 @@
 """
-Enhanced Validation Agent - Routes to 3 Branches
-MISSING → Clarifier
-AMBIGUOUS → Disambiguation
-VALID → Retriever
+ValidationAgent – Clean 3-way routing:
+- MISSING: Required entities missing or invalid
+- AMBIGUOUS: Multiple possible matches (fuzzy)
+- OK: Entities valid and unambiguous
 """
 
 import time
-from typing import Dict, Any, Literal
+from typing import Dict, Any, List, Literal
 
 
 class ValidationAgent:
     """
-    Enhanced validation with 3-way routing
-    
-    Routes:
-    1. MISSING → entities are incomplete, need clarification
-    2. AMBIGUOUS → entities have multiple matches, need disambiguation
-    3. VALID → entities are verified, proceed to retrieval
+    Validates extracted entities and decides routing:
+    - missing      → Clarification Agent
+    - ambiguous    → Disambiguation Agent
+    - ok           → QueryAgent
     """
-    
+
     def __init__(self, data_loader):
         self.data_loader = data_loader
-    
+
+    # =====================================================================
+    # MAIN ENTRY
+    # =====================================================================
     def validate(self, intent: str, entities: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate entities and determine routing
-        
-        Returns:
-        {
-            "status": "ok" | "missing" | "ambiguous",
-            "entities": dict,  # valid entities
-            "invalid_entities": dict,
-            "missing_fields": list,
-            "ambiguous_entities": dict,
-            "suggestions": dict,
-            "needs_clarification": bool,
-            "notes": str,
-            "duration_ms": int
-        }
-        """
-        start_time = time.time()        
-        # Skip validation for temporal_comparison (special structure)
+        start = time.time()
+
+        notes = []
+        missing = []
+        ambiguous = {}
+        invalid = {}
+        suggestions = {}
+
+        props_valid = self.data_loader.get_properties()
+        tenants_valid = self.data_loader.get_tenants()
+
+        # ================================================================
+        # SPECIAL CASE – TEMPORAL COMPARISON
+        # ================================================================
         if intent == "temporal_comparison":
-            return self._validate_temporal_comparison(entities, start_time)
-        
-        # Run standard validation
-        validation_result = self.data_loader.validate_entities(entities)
-        
-        # Analyze validation result
-        is_valid = validation_result["valid"]
-        invalid_entities = validation_result.get("invalid_entities", {})
-        suggestions = validation_result.get("suggestions", {})
-        
-        # Determine status
-        validation_status: Literal["MISSING", "AMBIGUOUS", "VALID"] = "VALID"
-        missing_fields = []
-        ambiguous_entities = {}
-        reasoning_parts = []
-        
-        if not is_valid:
-            # Check if entities are missing or invalid
-            if "property" in invalid_entities or "properties" in invalid_entities:
-                invalid_props = invalid_entities.get("property", invalid_entities.get("properties", []))
-                
-                # Check if it's a partial match (ambiguous)
-                for prop in invalid_props:
-                    candidates = self._find_fuzzy_matches(prop, self.data_loader.get_properties())
-                    if len(candidates) > 1:
-                        validation_status = "AMBIGUOUS"
-                        ambiguous_entities.setdefault("properties", []).append({
-                            "input": prop,
-                            "candidates": candidates
-                        })
-                        reasoning_parts.append(f"Property '{prop}' is ambiguous ({len(candidates)} matches)")
-                    elif len(candidates) == 0:
-                        validation_status = "MISSING"
-                        missing_fields.append(f"property: {prop}")
-                        reasoning_parts.append(f"Property '{prop}' not found")
+            return self._validate_temporal_comparison(entities, start)
+
+        # ================================================================
+        # 1. VALIDATE PROPERTIES (skip for analytics_query)
+        # ================================================================
+        if intent != "analytics_query":  # analytics_query doesn't require properties
+            props = entities.get("properties", [])
+            # Handle None case
+            if props is None:
+                props = []
+            elif isinstance(props, str):
+                props = [props]
+
+            # Valid portfolio-level properties
+            portfolio_properties = {"PropCo", "Portfolio", "All Properties", "All Buildings"}
             
-            if "tenant" in invalid_entities or "tenants" in invalid_entities:
-                invalid_tenants = invalid_entities.get("tenant", invalid_entities.get("tenants", []))
+            for p in props:
+                # Accept portfolio-level properties
+                if p in portfolio_properties:
+                    notes.append(f"Portfolio-level query: {p}")
+                    continue
                 
-                for tenant in invalid_tenants:
-                    candidates = self._find_fuzzy_matches(tenant, self.data_loader.get_tenants())
-                    if len(candidates) > 1:
-                        validation_status = "AMBIGUOUS"
-                        ambiguous_entities.setdefault("tenants", []).append({
-                            "input": tenant,
-                            "candidates": candidates
+                if p not in props_valid:
+                    # Fuzzy match
+                    cands = self._fuzzy_candidates(p, props_valid)
+                    if len(cands) == 1:
+                        # Auto-correct
+                        notes.append(f"Auto-matched '{p}' → '{cands[0]}'")
+                        entities["properties"] = [
+                            cands[0] if x == p else x for x in entities["properties"]
+                        ]
+                    elif len(cands) > 1:
+                        ambiguous.setdefault("properties", []).append({
+                            "input": p,
+                            "candidates": cands
                         })
-                        reasoning_parts.append(f"Tenant '{tenant}' is ambiguous ({len(candidates)} matches)")
-                    elif len(candidates) == 0:
-                        validation_status = "MISSING"
-                        missing_fields.append(f"tenant: {tenant}")
-                        reasoning_parts.append(f"Tenant '{tenant}' not found")
+                    else:
+                        invalid.setdefault("properties", []).append(p)
+
+        # ================================================================
+        # 2. VALIDATE TENANTS IF NEEDED (only if tenant specified, not property)
+        # ================================================================
+        if intent == "tenant_info":
+            # Special case: "Show me the tenants for Building X" - has property, not tenant
+            has_property = entities.get("property") or entities.get("properties")
+            if not has_property:
+                # Original logic: validate tenant
+                t = entities.get("tenants", [])
+                if isinstance(t, str):
+                    t = [t]
+
+                for tenant in t:
+                    if tenant not in tenants_valid:
+                        cands = self._fuzzy_candidates(tenant, tenants_valid)
+                        if len(cands) > 1:
+                            ambiguous.setdefault("tenants", []).append({
+                                "input": tenant,
+                                "candidates": cands
+                            })
+                        else:
+                            invalid.setdefault("tenants", []).append(tenant)
+
+        # ================================================================
+        # 3. CHECK REQUIRED FIELDS (skip for analytics_query)
+        # ================================================================
+        if intent != "analytics_query":  # analytics_query doesn't require entities
+            missing_required = self._get_missing_required(intent, entities)
+            if missing_required:
+                missing.extend(missing_required)
+
+        # ================================================================
+        # FINAL ROUTING DECISION
+        # ================================================================
+        # Special case: analytics_query doesn't require validation
+        if intent == "analytics_query":
+            status = "ok"
+            notes.append("Analytics query - no entity validation required")
+        elif ambiguous:
+            status = "ambiguous"
+            notes.append("Some entities are ambiguous")
+
+        elif invalid or missing:
+            status = "missing"
+            notes.append("Some entities are missing or invalid")
+
         else:
-            reasoning_parts.append("All entities validated successfully")
-        
-        # Check for missing required fields based on intent
-        required_fields = self._get_required_fields(intent)
-        for field in required_fields:
-            if field not in entities or not entities[field]:
-                validation_status = "MISSING"
-                missing_fields.append(field)
-                reasoning_parts.append(f"Required field '{field}' is missing")
-        
-        duration_ms = int((time.time() - start_time) * 1000)
-        
-        reasoning = "; ".join(reasoning_parts) if reasoning_parts else "Validation passed"        
-        # Map to unified status
-        status_map = {"VALID": "ok", "MISSING": "missing", "AMBIGUOUS": "ambiguous"}
-        unified_status = status_map.get(validation_status, "ok")
-        
+            status = "ok"
+            notes.append("All entities validated")
+
         return {
-            "status": unified_status,
-            "validation_status": validation_status,  # Keep for routing
-            "entities": entities if is_valid else {},
-            "invalid_entities": invalid_entities,
-            "missing_fields": missing_fields,
-            "ambiguous_entities": ambiguous_entities,
+            "status": status,
+            "validation_status": status,
+            "entities": entities if status == "ok" else {},
+            "invalid_entities": invalid,
+            "missing_fields": missing,
+            "ambiguous_entities": ambiguous,
             "suggestions": suggestions,
-            "needs_clarification": validation_status in ["MISSING", "AMBIGUOUS"],
-            "notes": reasoning,
-            "duration_ms": duration_ms
+            "needs_clarification": status in ["missing", "ambiguous"],
+            "notes": "; ".join(notes),
+            "duration_ms": int((time.time() - start) * 1000),
         }
-    
-    def _validate_temporal_comparison(self, entities: Dict[str, Any], start_time: float) -> Dict[str, Any]:
-        """Special validation for temporal comparison"""
-        # Check if we have periods or components to build periods
-        has_periods = "periods" in entities and len(entities.get("periods", [])) >= 2
-        
-        # Check if we can build periods from year/quarter/month
-        can_build_periods = False
-        if "year" in entities and isinstance(entities["year"], list) and len(entities["year"]) >= 2:
-            can_build_periods = True
-        elif "quarter" in entities and isinstance(entities["quarter"], list) and len(entities["quarter"]) >= 2:
-            can_build_periods = True
-        elif "month" in entities and isinstance(entities["month"], list) and len(entities["month"]) >= 2:
-            can_build_periods = True
-        
-        duration_ms = int((time.time() - start_time) * 1000)
-        
-        if has_periods or can_build_periods:
-            return {
-                "status": "ok",
-                "validation_status": "VALID",
-                "entities": entities,
-                "invalid_entities": {},
-                "missing_fields": [],
-                "ambiguous_entities": {},
-                "suggestions": {},
-                "needs_clarification": False,
-                "notes": "Temporal comparison entities validated",
-                "duration_ms": duration_ms
-            }
-        else:
+
+    # =====================================================================
+    # SPECIAL VALIDATION FOR TEMPORAL COMPARISON
+    # =====================================================================
+    def _validate_temporal_comparison(self, entities: Dict[str, Any], start: float):
+        props = entities.get("properties", [])
+        periods = entities.get("periods", [])
+
+        valid_props = self.data_loader.get_properties()
+
+        # 1 property required
+        if not props or props[0] not in valid_props:
             return {
                 "status": "missing",
-                "validation_status": "MISSING",
+                "validation_status": "missing",
                 "entities": {},
-                "invalid_entities": {},
-                "missing_fields": ["periods (need at least 2 time periods)"],
+                "invalid_entities": {"properties": props},
+                "missing_fields": ["properties"],
                 "ambiguous_entities": {},
                 "suggestions": {},
                 "needs_clarification": True,
-                "notes": "Temporal comparison requires at least 2 time periods",
-                "duration_ms": duration_ms
+                "notes": "Temporal comparison requires one valid property",
+                "duration_ms": int((time.time() - start) * 1000),
             }
-    
-    def _find_fuzzy_matches(self, query: str, candidates: list, threshold: float = 0.6) -> list:
-        """Find fuzzy matches for a query string"""
-        from difflib import SequenceMatcher
-        
-        matches = []
-        query_lower = query.lower()
-        
-        for candidate in candidates:
-            candidate_lower = candidate.lower()
-            
-            # Exact match
-            if query_lower == candidate_lower:
-                return [candidate]  # Single exact match
-            
-            # Substring match or similarity
-            if query_lower in candidate_lower or candidate_lower in query_lower:
-                similarity = SequenceMatcher(None, query_lower, candidate_lower).ratio()
-                if similarity >= threshold:
-                    matches.append((candidate, similarity))
-        
-        # Sort by similarity
-        matches.sort(key=lambda x: x[1], reverse=True)
-        
-        return [m[0] for m in matches[:5]]  # Top 5 matches
-    
-    def _get_required_fields(self, intent: str) -> list:
-        """Get required fields for an intent"""
-        required_map = {
-            "property_comparison": ["properties"],  # Need at least 2
-            "temporal_comparison": ["periods"],  # Need at least 2
-            "pl_calculation": [],  # Flexible
-            "property_details": ["properties"],
-            "tenant_info": ["tenants"],
-            "multi_entity_query": ["sub_queries"],
-        }
-        
-        return required_map.get(intent, [])
 
+        # Two time periods required
+        if not periods or len(periods) < 2:
+            return {
+                "status": "missing",
+                "validation_status": "missing",
+                "entities": {},
+                "invalid_entities": {},
+                "missing_fields": ["periods (need ≥ 2)"],
+                "ambiguous_entities": {},
+                "suggestions": {},
+                "needs_clarification": True,
+                "notes": "Temporal comparison requires at least 2 periods",
+                "duration_ms": int((time.time() - start) * 1000),
+            }
+
+        # Valid
+        return {
+            "status": "ok",
+            "validation_status": "ok",
+            "entities": entities,
+            "invalid_entities": {},
+            "missing_fields": [],
+            "ambiguous_entities": {},
+            "suggestions": {},
+            "needs_clarification": False,
+            "notes": "Temporal comparison validated",
+            "duration_ms": int((time.time() - start) * 1000),
+        }
+
+    # =====================================================================
+    # HELPERS
+    # =====================================================================
+    def _fuzzy_candidates(self, query: str, candidates: List[str], threshold=0.6):
+        """Return possible fuzzy matches."""
+        from difflib import SequenceMatcher
+        q = query.lower()
+        out = []
+        for c in candidates:
+            score = SequenceMatcher(None, q, c.lower()).ratio()
+            if score >= threshold:
+                out.append(c)
+        return out[:5]
+
+    def _get_missing_required(self, intent: str, ent: Dict[str, Any]):
+        req = {
+            "property_comparison": ["properties"],   # 2+ will be handled by QueryAgent
+            "pl_calculation": ["properties"],        # year optional
+            "property_details": ["properties"],
+            "tenant_info": ["tenants", "properties"],  # Either tenants OR properties
+            "multi_entity_query": ["sub_queries"]
+        }
+        missing = []
+        need = req.get(intent, [])
+        
+        # Special case for tenant_info: need either tenants OR properties
+        if intent == "tenant_info":
+            has_tenants = ent.get("tenants") and len(ent.get("tenants", [])) > 0
+            has_properties = ent.get("property") or (ent.get("properties") and len(ent.get("properties", [])) > 0)
+            if not has_tenants and not has_properties:
+                missing.append("tenants or properties")
+        else:
+            for f in need:
+                if f not in ent or not ent[f]:
+                    missing.append(f)
+        return missing

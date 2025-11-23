@@ -1,138 +1,108 @@
 """
-LLM Client - Now using OpenAI GPT-4o-mini
-Switched from Llama 3.2-3B for better performance and reliability
+LLM Client – Clean, LangChain-compatible, AIMessage-safe
+Compatible with the orchestrator and all agents.
 """
 
 import os
 from typing import Optional
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_core.language_models.llms import BaseLLM
+from langchain.schema import HumanMessage, SystemMessage, AIMessage
 
-# Load environment variables
+
+# Load ENV
 load_dotenv(".env.local")
 load_dotenv()
 
 
 class LLMClient:
-    """Client for interacting with OpenAI GPT-4o-mini"""
-    
+    """Wrapper around ChatOpenAI with correct message formatting."""
+
     MODEL_NAME = "gpt-4o-mini"
-    
+
     def __init__(self, api_token: Optional[str] = None):
-        """Initialize the LLM client
-        
-        Args:
-            api_token: OpenAI API token (if not provided, reads from env)
-        """
-        # Support both OPENAI_API_KEY and HUGGINGFACE_API_TOKEN for backward compatibility
         self.api_token = (
-            api_token or 
-            os.getenv("OPENAI_API_KEY") or 
-            os.getenv("HUGGINGFACE_API_TOKEN")
+            api_token
+            or os.getenv("OPENAI_API_KEY")
+            or os.getenv("HUGGINGFACE_API_TOKEN")
         )
-        
+
         if not self.api_token:
             raise ValueError(
-                "OpenAI API token not found. "
-                "Set OPENAI_API_KEY in .env.local file\n"
-                "Or rename your existing HuggingFace token to OPENAI_API_KEY"
+                "❌ Missing API key.\n"
+                "Please set OPENAI_API_KEY in your .env.local"
             )
-        
-        self.llm = self._initialize_llm()
-    
-    def _initialize_llm(self) -> BaseLLM:
-        """Initialize the OpenAI LLM"""
-        llm = ChatOpenAI(
+
+        # Create LLM instance
+        self.llm = ChatOpenAI(
             model=self.MODEL_NAME,
-            temperature=0,  # Deterministic for consistent entity extraction
             api_key=self.api_token,
-            max_tokens=1024  # Increased for complex responses
+            temperature=0,
+            max_tokens=1500,
         )
-        
-        print(f"✅ Initialized LLM: {self.MODEL_NAME}")
-        return llm
-    
-    def get_llm(self) -> BaseLLM:
-        """Get the initialized LLM instance"""
+
+        print(f"✅ Initialized OpenAI model: {self.MODEL_NAME}")
+
+    # ------------------------------------------------------------
+    # PUBLIC API
+    # ------------------------------------------------------------
+
+    def get_llm(self) -> ChatOpenAI:
+        """Return the raw ChatOpenAI instance."""
         return self.llm
-    
-    def invoke(self, prompt: str) -> str:
-        """Invoke the LLM with a prompt
-        
-        Args:
-            prompt: The input prompt
-            
+
+    def invoke(self, prompt: str):
+        """
+        Invoke the model with a simple string prompt.
+
         Returns:
-            The LLM's response as a string
+            AIMessage (standard LangChain object)
         """
         try:
-            # ChatOpenAI returns AIMessage, we need the content
-            response = self.llm.invoke(prompt)
-            return self._extract_content(response)
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+
+            # Safety: ensure AIMessage
+            if isinstance(response, AIMessage):
+                return response
+            if hasattr(response, "content"):
+                return AIMessage(content=response.content)
+
+            return AIMessage(content=str(response))
+
         except Exception as e:
-            return f"Error invoking LLM: {str(e)}"
-    
-    def _extract_content(self, response) -> str:
-        """Extract text content from LLM response
-        
-        Handles both AIMessage objects and plain strings
-        
-        Args:
-            response: LLM response (AIMessage or str)
-            
-        Returns:
-            Cleaned string content
-        """
-        if hasattr(response, 'content'):
-            # AIMessage from ChatOpenAI
-            return response.content.strip()
-        return str(response).strip()
+            return AIMessage(content=f"LLM invocation error: {str(e)}")
 
 
-def create_prompt(
-    system_message: str,
-    user_message: str,
-    examples: Optional[list] = None
-) -> str:
-    """Create a formatted prompt for GPT-4o-mini
-    
-    Args:
-        system_message: System instructions
-        user_message: User's input
-        examples: Optional list of example interactions
-        
-    Returns:
-        Formatted prompt string
+# ------------------------------------------------------------
+# HELPER FOR PROMPTS
+# ------------------------------------------------------------
+
+def create_prompt(system_message: str, user_message: str, examples=None) -> str:
     """
-    # For GPT-4o-mini, we can use a simpler format
+    Create a simple prompt (string). LLMClient will wrap it as HumanMessage.
+    """
     prompt = f"{system_message}\n\n"
-    
+
     if examples:
         prompt += "Examples:\n"
-        for example in examples:
-            prompt += f"User: {example['user']}\n"
-            prompt += f"Assistant: {example['assistant']}\n\n"
-    
-    prompt += f"User: {user_message}\n"
-    prompt += "Assistant:"
-    
+        for ex in examples:
+            prompt += f"User: {ex['user']}\nAssistant: {ex['assistant']}\n\n"
+
+    prompt += f"User: {user_message}\nAssistant:"
     return prompt
 
 
+# ------------------------------------------------------------
+# MANUAL TEST
+# ------------------------------------------------------------
 if __name__ == "__main__":
-    # Test the LLM client
-    try:
-        client = LLMClient()
-        
-        test_prompt = create_prompt(
-            system_message="You are a helpful real estate assistant.",
-            user_message="What is a P&L statement?"
-        )
-        
-        print("\n🤖 Testing LLM...")
-        response = client.invoke(test_prompt)
-        print(f"Response: {response}")
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    llm_client = LLMClient()
+
+    prompt = create_prompt(
+        "You are a helpful AI.",
+        "Explain profit vs revenue."
+    )
+
+    print("\n🤖 Testing LLM...")
+    res = llm_client.invoke(prompt)
+    print("Response:", res.content)

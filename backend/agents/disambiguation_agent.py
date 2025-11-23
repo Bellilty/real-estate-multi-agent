@@ -1,225 +1,121 @@
 """
-Disambiguation Agent - Resolves Ambiguous Entities
-Handles cases like "Building 18" vs "Building 180"
+Disambiguation Agent – resolves ambiguous entities reported by ValidationAgent
+NE REDETECTS NOTHING.
+It ONLY resolves what ValidationAgent flagged as ambiguous.
 """
 
 import time
 from typing import Dict, Any, List
-from difflib import SequenceMatcher
 
 
 class DisambiguationAgent:
     """
-    Resolves ambiguous entity references
-    
-    Examples:
-    - "Building 18" → could be "Building 18" or "Building 180"
-    - "Tenant" → multiple tenants exist
-    - Partial matches from SearchTool
+    Resolves ambiguous entities based on suggestions from ValidationAgent.
+
+    ValidationAgent provides:
+        ambiguous_entities = {
+            "properties": [
+                {"input": "Building 18", "candidates": ["Building 18", "Building 180"]}
+            ],
+            "tenants": [
+                {"input": "Tenant A", "candidates": ["Tenant A1", "Tenant AB"]}
+            ]
+        }
     """
-    
+
     def __init__(self, data_loader):
         self.data_loader = data_loader
-    
+
+    # =====================================================================
     def process(self, entities: Dict[str, Any], ambiguous_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Disambiguate entities
-        
-        Args:
-            entities: Extracted entities
-            ambiguous_info: Information about ambiguities from validation
-        
+        Disambiguate entities using ambiguous_info from ValidationAgent.
+
         Returns:
         {
-            "status": "ok" | "ambiguous" | "error",
-            "entities": dict,  # clarified entities
-            "suggestions": dict,
+            "status": "ok" | "ambiguous",
+            "entities": dict,
             "needs_clarification": bool,
             "clarification_message": str,
+            "suggestions": dict,
             "notes": str,
             "duration_ms": int
         }
         """
-        start_time = time.time()        
+        start = time.time()
+
         clarified = entities.copy()
         suggestions = {}
         needs_clarification = False
-        clarification_message = ""
+        clarification_lines = []
         reasoning_parts = []
-        
-        # Disambiguate properties
-        if "properties" in entities:
-            properties = entities["properties"]
-            if isinstance(properties, list):
-                resolved_props = []
-                for prop in properties:
-                    result = self._disambiguate_property(prop)
-                    
-                    if result["resolved"]:
-                        resolved_props.append(result["resolved_to"])
-                        reasoning_parts.append(f"'{prop}' → '{result['resolved_to']}'")
-                    elif result["candidates"]:
-                        # Multiple candidates
-                        suggestions["properties"] = result["candidates"]
-                        needs_clarification = True
-                        clarification_message = f"Did you mean: {', '.join(result['candidates'][:5])}?"
-                    else:
-                        # No match
-                        resolved_props.append(prop)  # Keep original
-                
-                clarified["properties"] = resolved_props
-        
-        # Disambiguate tenants
-        if "tenants" in entities:
-            tenants = entities["tenants"]
-            if isinstance(tenants, list):
-                resolved_tenants = []
-                for tenant in tenants:
-                    result = self._disambiguate_tenant(tenant)
-                    
-                    if result["resolved"]:
-                        resolved_tenants.append(result["resolved_to"])
-                        reasoning_parts.append(f"'{tenant}' → '{result['resolved_to']}'")
-                    elif result["candidates"]:
-                        suggestions["tenants"] = result["candidates"]
-                        needs_clarification = True
-                        if clarification_message:
-                            clarification_message += f" Or tenant: {', '.join(result['candidates'][:5])}?"
-                        else:
-                            clarification_message = f"Did you mean tenant: {', '.join(result['candidates'][:5])}?"
-                    else:
-                        resolved_tenants.append(tenant)
-                
-                clarified["tenants"] = resolved_tenants
-        
-        duration_ms = int((time.time() - start_time) * 1000)
-        
-        reasoning = "; ".join(reasoning_parts) if reasoning_parts else "No disambiguation needed"        
-        status = "ambiguous" if needs_clarification else "ok"
-        
+
+        ambiguous_properties = ambiguous_info.get("properties", [])
+        ambiguous_tenants = ambiguous_info.get("tenants", [])
+
+        # ============================================================
+        # PROPERTIES
+        # ============================================================
+        if ambiguous_properties:
+            new_props = []
+            for ap in ambiguous_properties:
+                input_name = ap["input"]
+                candidates = ap["candidates"]
+
+                if len(candidates) == 1:
+                    # Auto-resolve
+                    resolved = candidates[0]
+                    new_props.append(resolved)
+                    reasoning_parts.append(f"Auto-resolved '{input_name}' → '{resolved}'")
+                else:
+                    # Need user clarification
+                    needs_clarification = True
+                    suggestions.setdefault("properties", []).append({
+                        "input": input_name,
+                        "candidates": candidates
+                    })
+                    clarification_lines.append(
+                        f"Which property did you mean for '{input_name}'? Options: {', '.join(candidates)}"
+                    )
+
+            clarified["properties"] = new_props if new_props else clarified.get("properties", [])
+
+        # ============================================================
+        # TENANTS
+        # ============================================================
+        if ambiguous_tenants:
+            new_tenants = []
+            for at in ambiguous_tenants:
+                input_name = at["input"]
+                candidates = at["candidates"]
+
+                if len(candidates) == 1:
+                    resolved = candidates[0]
+                    new_tenants.append(resolved)
+                    reasoning_parts.append(f"Auto-resolved '{input_name}' → '{resolved}'")
+                else:
+                    needs_clarification = True
+                    suggestions.setdefault("tenants", []).append({
+                        "input": input_name,
+                        "candidates": candidates
+                    })
+                    clarification_lines.append(
+                        f"Which tenant did you mean for '{input_name}'? Options: {', '.join(candidates)}"
+                    )
+
+            clarified["tenants"] = new_tenants if new_tenants else clarified.get("tenants", [])
+
+        # ============================================================
+        # OUTPUT
+        # ============================================================
+        duration_ms = int((time.time() - start) * 1000)
+
         return {
-            "status": status,
+            "status": "ambiguous" if needs_clarification else "ok",
             "entities": clarified,
-            "suggestions": suggestions,
             "needs_clarification": needs_clarification,
-            "clarification_message": clarification_message,
-            "notes": reasoning,
+            "clarification_message": "\n".join(clarification_lines),
+            "suggestions": suggestions,
+            "notes": "; ".join(reasoning_parts) if reasoning_parts else "No disambiguation performed",
             "duration_ms": duration_ms
         }
-    
-    def _disambiguate_property(self, prop_name: str) -> Dict[str, Any]:
-        """
-        Disambiguate a single property name
-        
-        Returns:
-        {
-            "resolved": bool,
-            "resolved_to": str or None,
-            "candidates": list
-        }
-        """
-        all_properties = self.data_loader.get_properties()
-        
-        # Exact match (case-insensitive)
-        for p in all_properties:
-            if p.lower() == prop_name.lower():
-                return {
-                    "resolved": True,
-                    "resolved_to": p,
-                    "candidates": []
-                }
-        
-        # Fuzzy match - find candidates
-        candidates = []
-        prop_lower = prop_name.lower()
-        
-        for p in all_properties:
-            p_lower = p.lower()
-            
-            # Substring match
-            if prop_lower in p_lower or p_lower in prop_lower:
-                similarity = SequenceMatcher(None, prop_lower, p_lower).ratio()
-                candidates.append((p, similarity))
-        
-        # Sort by similarity
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        
-        # If only one strong candidate (>0.8 similarity), auto-resolve
-        if len(candidates) == 1 and candidates[0][1] > 0.8:
-            return {
-                "resolved": True,
-                "resolved_to": candidates[0][0],
-                "candidates": []
-            }
-        
-        # Multiple candidates
-        if len(candidates) > 1:
-            return {
-                "resolved": False,
-                "resolved_to": None,
-                "candidates": [c[0] for c in candidates[:5]]
-            }
-        
-        # No candidates
-        return {
-            "resolved": False,
-            "resolved_to": None,
-            "candidates": []
-        }
-    
-    def _disambiguate_tenant(self, tenant_name: str) -> Dict[str, Any]:
-        """
-        Disambiguate a single tenant name
-        
-        Returns:
-        {
-            "resolved": bool,
-            "resolved_to": str or None,
-            "candidates": list
-        }
-        """
-        all_tenants = self.data_loader.get_tenants()
-        
-        # Exact match (case-insensitive)
-        for t in all_tenants:
-            if t.lower() == tenant_name.lower():
-                return {
-                    "resolved": True,
-                    "resolved_to": t,
-                    "candidates": []
-                }
-        
-        # Fuzzy match
-        candidates = []
-        tenant_lower = tenant_name.lower()
-        
-        for t in all_tenants:
-            t_lower = t.lower()
-            
-            if tenant_lower in t_lower or t_lower in tenant_lower:
-                similarity = SequenceMatcher(None, tenant_lower, t_lower).ratio()
-                candidates.append((t, similarity))
-        
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        
-        # Auto-resolve if single strong match
-        if len(candidates) == 1 and candidates[0][1] > 0.8:
-            return {
-                "resolved": True,
-                "resolved_to": candidates[0][0],
-                "candidates": []
-            }
-        
-        if len(candidates) > 1:
-            return {
-                "resolved": False,
-                "resolved_to": None,
-                "candidates": [c[0] for c in candidates[:5]]
-            }
-        
-        return {
-            "resolved": False,
-            "resolved_to": None,
-            "candidates": []
-        }
-

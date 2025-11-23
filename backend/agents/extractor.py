@@ -1,7 +1,13 @@
 """
-Extractor Agent v3 - Simplified JSON-based
-Uses LLM to extract entities with JSON responses
-NO MORE REGEX FALLBACKS!
+UNIFIED & ROBUST ENTITY EXTRACTOR
+Supports:
+- temporal_comparison
+- property_comparison
+- multi_entity_query
+- analytics_query (list / max / min / top / count)
+- pl_calculation
+- tenant_info
+- fallback regex (improved)
 """
 
 import json
@@ -11,259 +17,287 @@ from typing import Dict, Any, List
 from backend.utils.prompts import PromptTemplates
 
 
+GENERIC_PROPERTIES = {"PropCo", "Portfolio", "All Properties", "All Buildings"}
+
+
 class EntityExtractor:
-    """Extracts entities from user queries using LLM with JSON output"""
+    """Extracts entities from user queries using LLM with JSON output."""
     
     def __init__(self, llm, available_properties: List[str]):
         self.llm = llm
         self.available_properties = available_properties
         self.prompt_templates = PromptTemplates()
     
-    def extract_entities(
-        self,
-        user_query: str,
-        intent: str,
-        chat_history: List[Dict[str, str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Extract entities using LLM
-        
-        Args:
-            user_query: The user's question
-            intent: The classified intent
-            chat_history: Previous conversation for context
-            
-        Returns:
-            {
-                "success": bool,
-                "entities": dict,
-                "duration_ms": int
-            }
-        """
-        start_time = time.time()
+    # -------------------------------------------------------------
+    # MAIN EXTRACTION
+    # -------------------------------------------------------------
+    def extract_entities(self, user_query: str, intent: str, chat_history=None):
+        start = time.time()
         
         try:
-            # Build prompt
             base_prompt = self.prompt_templates.extractor_entities(
                 user_query, intent, self.available_properties
             )
             
-            # Add chat history if available
-            if chat_history:
-                prompt = self.prompt_templates.add_chat_context(base_prompt, chat_history)
-            else:
-                prompt = base_prompt
+            prompt = (
+                self.prompt_templates.add_chat_context(base_prompt, chat_history)
+                if chat_history
+                else base_prompt
+            )
+
+            llm_response = self.llm.invoke(prompt)
+            entities = self._parse_json_response(llm_response)
             
-            # Call LLM
-            response = self.llm.invoke(prompt)
-            
-            # Parse JSON response
-            entities = self._parse_json_response(response)
-            
-            # Post-process entities
             entities = self._normalize_entities(entities, intent, user_query)
-            
-            duration_ms = int((time.time() - start_time) * 1000)
             
             return {
                 "success": True,
                 "entities": entities,
-                "duration_ms": duration_ms
+                "duration_ms": int((time.time() - start) * 1000),
             }
             
         except Exception as e:
-            # Fallback: try simple regex extraction
-            fallback_entities = self._simple_fallback_extraction(user_query, intent)
-            
+            # Improved fallback
+            fb = self._fallback_regex_extraction(user_query, intent)
             return {
                 "success": True,
-                "entities": fallback_entities,
-                "duration_ms": int((time.time() - start_time) * 1000),
+                "entities": fb,
+                "duration_ms": int((time.time() - start) * 1000),
                 "fallback_used": True,
-                "error": str(e)
+                "error": str(e),
             }
     
-    def _parse_json_response(self, response) -> Dict[str, Any]:
-        """Parse LLM JSON response with fallbacks"""
-        # Handle both string and AIMessage
-        if hasattr(response, 'content'):
-            text = response.content
-        else:
-            text = str(response)
-        
+    # -------------------------------------------------------------
+    # JSON PARSING
+    # -------------------------------------------------------------
+    def _parse_json_response(self, response):
+        text = response.content if hasattr(response, "content") else str(response)
+        text = text.strip()
+
+        # strict
         try:
-            # Try direct JSON parse
-            return json.loads(text.strip())
-        except json.JSONDecodeError:
-            # Try to extract JSON from markdown code blocks
-            if "```json" in text:
-                json_str = text.split("```json")[1].split("```")[0].strip()
-                return json.loads(json_str)
-            elif "```" in text:
-                json_str = text.split("```")[1].split("```")[0].strip()
-                return json.loads(json_str)
-            
-            # Try to find JSON object in text
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start != -1 and end > start:
-                json_str = text[start:end]
-                return json.loads(json_str)
-            
-            raise ValueError(f"Could not parse JSON from response: {text[:200]}")
-    
-    def _normalize_entities(self, entities: Dict[str, Any], intent: str, user_query: str = "") -> Dict[str, Any]:
-        """Normalize and validate extracted entities"""
-        normalized = {}
+            return json.loads(text)
+        except:
+            pass
+
+        # inside ```json
+        if "```" in text:
+            for block in text.split("```"):
+                if "{" in block:
+                    try:
+                        return json.loads(block[block.find("{"):block.rfind("}")+1])
+                    except:
+                        pass
+
+        # last chance
+        if "{" in text and "}" in text:
+            try:
+                return json.loads(text[text.find("{"): text.rfind("}")+1])
+            except:
+                pass
+
+        raise ValueError("Extractor: invalid JSON returned")
+
+    # -------------------------------------------------------------
+    # ENTITY NORMALISATION
+    # -------------------------------------------------------------
+    def _normalize_entities(self, ent: Dict[str, Any], intent: str, user_query: str):
+        out = {}
         
-        # Properties
-        properties = entities.get("properties")
-        if properties and isinstance(properties, list):
-            normalized["properties"] = [p for p in properties if p]
-            if intent == "property_comparison":
-                normalized["count"] = len(normalized["properties"])
-                normalized["requested_properties"] = normalized["properties"].copy()
-        elif properties:
-            normalized["properties"] = [properties]
-        
-        # Year - handle list for temporal_comparison
-        year = entities.get("year")
-        if year:
+        # --------- PROPERTIES ----------
+        props = ent.get("properties")
+        if props is None:
+            out["properties"] = None
+        elif isinstance(props, list):
+            out["properties"] = [p for p in props if p]
+        else:
+            out["properties"] = [props]
+
+        # handle generic "all"
+        all_patterns = [
+            "all buildings", "all properties", "for all properties", "all the buildings",
+            "revenue for all properties", "expenses for all properties",
+            "all my properties", "all my buildings", "for all my properties",
+            "all of my properties", "all of my buildings"
+        ]
+        if any(x in user_query.lower() for x in all_patterns):
+            out["properties"] = ["PropCo"]
+            # Also set property (singular) for consistency
+            if not out.get("property"):
+                out["property"] = "PropCo"
+
+        # special case analytics_query: always detect operation
+        if intent == "analytics_query":
+            out["operation"] = self._detect_analytics_operation(user_query)
+            # For listing queries, properties can be None
+            if out["operation"] == "list":
+                out["properties"] = out.get("properties", None)
+            # Still extract year/quarter for analytics if present (for filtering)
+            year = ent.get("year")
             if isinstance(year, list):
-                # List of years for temporal_comparison
-                normalized["year"] = [str(y) for y in year if str(y) in ["2024", "2025"]]
-            elif str(year) in ["2024", "2025"]:
-                normalized["year"] = str(year)
-        
-        # FALLBACK for temporal_comparison: Extract years from query if missing
-        if intent == "temporal_comparison" and not normalized.get("year"):
-            years_in_query = re.findall(r'20(24|25)', user_query)
-            if len(years_in_query) >= 2:
-                normalized["year"] = [f"20{y}" for y in years_in_query][:2]
-        
-        # Quarter
-        quarter = entities.get("quarter")
-        if quarter:
-            quarter = str(quarter).upper()
-            if quarter in ["Q1", "Q2", "Q3", "Q4"]:
-                normalized["quarter"] = quarter
-                # Also set year if not present
-                if not normalized.get("year"):
-                    normalized["year"] = "2024"  # Default
-        
-        # Month
-        month = entities.get("month")
+                out["year"] = [str(y) for y in year]
+            elif year:
+                out["year"] = str(year)
+            quarter = ent.get("quarter")
+            if quarter:
+                out["quarter"] = quarter
+            return out
+
+        # --------- YEAR ----------
+        year = ent.get("year")
+        if isinstance(year, list):
+            out["year"] = [str(y) for y in year]
+        elif year:
+            out["year"] = str(year)
+
+        # fallback for temporal: extract 2024/2025
+        if intent == "temporal_comparison" and not out.get("year"):
+            yrs = re.findall(r'20(24|25)', user_query)
+            if len(yrs) >= 2:
+                out["year"] = [f"20{x}" for x in yrs]
+
+        # --------- QUARTER ----------
+        quarter = ent.get("quarter")
+        if isinstance(quarter, list):
+            out["quarter"] = [q.upper() for q in quarter]
+        elif quarter:
+            out["quarter"] = str(quarter).upper()
+
+        # --------- MONTH ----------
+        month = ent.get("month")
         if month:
-            normalized["month"] = self._normalize_month(month)
+            out["month"] = self._normalize_month(month)
         
-        # Tenants
-        tenants = entities.get("tenants")
+        # --------- TENANTS ----------
+        tenants = ent.get("tenants")
         if tenants:
-            if isinstance(tenants, list):
-                normalized["tenants"] = tenants
-            else:
-                normalized["tenants"] = [tenants]
-        
-        # SPECIAL: For temporal_comparison, create "periods" list from year/quarter/month
+            out["tenants"] = tenants if isinstance(tenants, list) else [tenants]
+
+        # --------- TEMPORAL_COMPARISON → periods ---------
         if intent == "temporal_comparison":
             periods = []
-            
-            # Check if year is a list (multiple years)
-            if isinstance(normalized.get("year"), list):
-                periods = normalized["year"]
-            # Check if quarter is a list
-            elif isinstance(normalized.get("quarter"), list):
-                year_context = normalized.get("year", "2024")
-                periods = [f"{year_context}-{q}" for q in normalized["quarter"]]
-            # Check if month is a list
-            elif isinstance(normalized.get("month"), list):
-                year_context = normalized.get("year", "2024")
-                periods = [f"{year_context}-{m}" for m in normalized["month"]]
-            
-            if periods:
-                normalized["periods"] = periods
-        
-        return normalized
-    
-    def _normalize_month(self, month_str: str) -> str:
-        """Normalize month to M01-M12 format"""
-        month_str = str(month_str).lower().strip()
-        
-        # Already in M01 format
-        if re.match(r'^m?\d{2}$', month_str):
-            if month_str.startswith('m'):
-                return month_str.upper()
-            return f"M{month_str}"
-        
-        # Month names
-        month_map = {
-            "january": "M01", "jan": "M01",
-            "february": "M02", "feb": "M02",
-            "march": "M03", "mar": "M03",
-            "april": "M04", "apr": "M04",
-            "may": "M05",
-            "june": "M06", "jun": "M06",
-            "july": "M07", "jul": "M07",
-            "august": "M08", "aug": "M08",
-            "september": "M09", "sep": "M09",
-            "october": "M10", "oct": "M10",
-            "november": "M11", "nov": "M11",
-            "december": "M12", "dec": "M12"
-        }
-        
-        return month_map.get(month_str, month_str.upper())
-    
-    def _simple_fallback_extraction(self, user_query: str, intent: str) -> Dict[str, Any]:
-        """Simple regex-based fallback if LLM fails"""
-        entities = {}
-        
-        # Extract buildings
-        buildings = re.findall(r'Building\s+\d+', user_query, re.IGNORECASE)
-        if buildings:
-            entities["properties"] = buildings
-        
-        # Extract years
-        years = re.findall(r'\b(2024|2025)\b', user_query)
-        if years:
-            entities["year"] = years[0]
-        
-        # Extract quarters
-        quarters = re.findall(r'\b(Q[1-4])\b', user_query, re.IGNORECASE)
-        if quarters:
-            entities["quarter"] = quarters[0].upper()
-        
-        # Extract tenants
-        tenants = re.findall(r'Tenant\s+\d+', user_query, re.IGNORECASE)
-        if tenants:
-            entities["tenants"] = tenants
-        
-        return entities
-    
-    def format_for_tracker(self, result: Dict[str, Any], intent: str) -> Dict[str, Any]:
-        """Format result for chain-of-thought tracker"""
-        entities = result.get("entities", {})
-        
-        # Build description based on intent
-        if intent == "property_comparison":
-            props = entities.get("properties", [])
-            desc = f"Extracted {len(props)} properties for comparison: {', '.join(props)}"
-        elif intent == "pl_calculation":
-            prop = entities.get("properties", ["None"])[0] if entities.get("properties") else "None"
-            year = entities.get("year", "None")
-            desc = f"Extracted P&L parameters: Property={prop}, Year={year}"
-        elif intent == "tenant_info":
-            tenant = entities.get("tenants", ["None"])[0] if entities.get("tenants") else "None"
-            desc = f"Extracted tenant: {tenant}"
-        else:
-            desc = f"Extracted entities: {entities}"
-        
-        return {
-            "step": "Extractor",
-            "duration_ms": result.get("duration_ms", 0),
-            "description": desc,
-            "metadata": {
-                "entities": entities,
-                "fallback_used": result.get("fallback_used", False)
-            }
-        }
+            if isinstance(out.get("quarter"), list):
+                periods = out["quarter"]
+            elif isinstance(out.get("year"), list):
+                periods = out["year"]
+            elif isinstance(out.get("month"), list):
+                periods = out["month"]
 
+            if periods:
+                out["periods"] = periods
+
+        # --------- MULTI ENTITY ---------
+        if intent == "multi_entity_query":
+            out["sub_queries"] = self._extract_multi_subqueries(user_query)
+
+        return out
+
+    # -------------------------------------------------------------
+    # ANALYTICS OPERATION DETECTOR
+    # -------------------------------------------------------------
+    def _detect_analytics_operation(self, query: str):
+        q = query.lower()
+
+        # Priority order: most specific first
+        if "highest" in q or "most" in q or ("max" in q and ("profit" in q or "expense" in q or "revenue" in q)):
+            return "max"
+        if "lowest" in q or "least" in q or ("min" in q and ("profit" in q or "expense" in q or "revenue" in q)):
+            return "min"
+        if "top" in q:
+            return "top"
+        if "bottom" in q:
+            return "bottom"
+        if "list" in q or ("all" in q and ("properties" in q or "tenants" in q or "buildings" in q)):
+            return "list"
+        if "sum" in q or "total" in q:
+            return "sum"
+        if "average" in q or "avg" in q or "mean" in q:
+            return "avg"
+        if "count" in q:
+            return "count"
+
+        return "list"
+
+    # -------------------------------------------------------------
+    # MULTI ENTITY SUB-QUERY PARSER
+    # -------------------------------------------------------------
+    def _extract_multi_subqueries(self, text: str):
+        """
+        Supports:
+        - Building 17 in 2024 AND Building 180 in 2025
+        - PropCo 2024 and Building 140 Q1
+        - Building 17 Q2 and PropCo Q1 2025
+        """
+        entities = re.split(r"\band\b|\balso\b", text, flags=re.IGNORECASE)
+        sub_queries = []
+
+        for e in entities:
+            prop = re.findall(r'(PropCo|Building\s+\d+)', e, re.IGNORECASE)
+            year = re.findall(r'\b(2024|2025)\b', e)
+            quarter = re.findall(r'\b(Q[1-4])\b', e, re.IGNORECASE)
+
+            sub = {"raw": e.strip()}
+
+            if prop:
+                sub["properties"] = [prop[0].title()]  # fix casing
+            if year:
+                sub["year"] = year[0]
+            if quarter:
+                sub["quarter"] = quarter[0].upper()
+
+            sub_queries.append(sub)
+
+        return sub_queries
+
+    # -------------------------------------------------------------
+    # NORMALIZE MONTH NAMES
+    # -------------------------------------------------------------
+    def _normalize_month(self, m):
+        m = str(m).lower().strip()
+        table = {
+            "jan": "M01", "january": "M01",
+            "feb": "M02", "february": "M02",
+            "mar": "M03", "march": "M03",
+            "apr": "M04", "april": "M04",
+            "may": "M05",
+            "jun": "M06", "june": "M06",
+            "jul": "M07", "july": "M07",
+            "aug": "M08", "august": "M08",
+            "sep": "M09", "september": "M09",
+            "oct": "M10", "october": "M10",
+            "nov": "M11", "november": "M11",
+            "dec": "M12", "december": "M12",
+        }
+        return table.get(m, m.upper())
+
+    # -------------------------------------------------------------
+    # IMPROVED FALLBACK
+    # -------------------------------------------------------------
+    def _fallback_regex_extraction(self, text: str, intent: str):
+        out = {}
+        
+        # buildings
+        props = re.findall(r"(PropCo|Building\s+\d+)", text, re.IGNORECASE)
+        if props:
+            out["properties"] = [p.title() for p in props]
+        
+        # years
+        years = re.findall(r"\b(2024|2025)\b", text)
+        if years:
+            out["year"] = years if intent == "temporal_comparison" else years[0]
+
+        # quarter
+        q = re.findall(r"\b(Q[1-4])\b", text, re.IGNORECASE)
+        if q:
+            out["quarter"] = [x.upper() for x in q] if intent == "temporal_comparison" else q[0].upper()
+        
+        # tenants
+        t = re.findall(r"Tenant\s+\d+", text, re.IGNORECASE)
+        if t:
+            out["tenants"] = t
+
+        # analytics fallback
+        if intent == "analytics_query":
+            out["operation"] = self._detect_analytics_operation(text)
+
+        return out

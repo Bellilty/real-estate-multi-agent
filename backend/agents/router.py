@@ -1,6 +1,6 @@
 """
-Router Agent v3 - Simplified JSON-based
-Uses LLM to classify intent with JSON responses
+Intent Router Agent – improved, robust, hallucination-safe.
+Uses LLM to classify user intent via STRICT JSON schema.
 """
 
 import json
@@ -10,120 +10,146 @@ from backend.utils.prompts import PromptTemplates
 
 
 class IntentRouter:
-    """Classifies user queries into intents using LLM with JSON output"""
-    
+    """Classifies user queries into intents using LLM and strict JSON output."""
+
+    VALID_INTENTS = {
+        "temporal_comparison",
+        "property_comparison",
+        "multi_entity_query",
+        "pl_calculation",
+        "property_details",
+        "tenant_info",
+        "analytics_query",      # NEW ❗ for list/min/max/sort/aggregations
+        "general_query",
+        "unsupported"
+    }
+
+    VALID_CONFIDENCE = {"high", "medium", "low"}
+
     def __init__(self, llm):
         self.llm = llm
         self.prompt_templates = PromptTemplates()
-    
+
+    # ------------------------------------------------------------------
+    # MAIN INTENT CLASSIFIER
+    # ------------------------------------------------------------------
     def classify_intent(
-        self, 
+        self,
         user_query: str,
         chat_history: List[Dict[str, str]] = None
     ) -> Dict[str, Any]:
-        """
-        Classify user intent using LLM
-        
-        Args:
-            user_query: The user's question
-            chat_history: Previous conversation for context
-            
-        Returns:
-            {
-                "intent": str,
-                "confidence": str (high/medium/low),
-                "reason": str,
-                "duration_ms": int
-            }
-        """
-        start_time = time.time()
-        
+
+        start = time.time()
+
         try:
-            # Build prompt
             base_prompt = self.prompt_templates.router_intent_classification(user_query)
-            
-            # Add chat history if available
-            if chat_history:
-                prompt = self.prompt_templates.add_chat_context(base_prompt, chat_history)
-            else:
-                prompt = base_prompt
-            
+
+            # Add chat history if provided
+            prompt = (
+                self.prompt_templates.add_chat_context(base_prompt, chat_history)
+                if chat_history else base_prompt
+            )
+
+            # Strict JSON constraints
+            prompt += """
+IMPORTANT JSON RULES:
+- You MUST return ONLY a valid JSON object.
+- Allowed intents (choose ONE): 
+  ["temporal_comparison", "property_comparison", "multi_entity_query",
+   "pl_calculation", "property_details", "tenant_info",
+   "analytics_query", "general_query", "unsupported"]
+- "confidence" must be one of: ["high", "medium", "low"].
+- Do NOT add text outside the JSON object.
+"""
+
             # Call LLM
-            response = self.llm.invoke(prompt)
-            
-            # Parse JSON response
-            result = self._parse_json_response(response)
-            
-            # Validate intent
-            valid_intents = [
-                "property_comparison", "temporal_comparison", "multi_entity_query",
-                "pl_calculation", "property_details", "tenant_info",
-                "general_query", "unsupported"
-            ]
-            
-            if result.get("intent") not in valid_intents:
-                result["intent"] = "general_query"
-                result["confidence"] = "low"
-                result["reason"] = "Unrecognized intent, defaulting to general_query"
-            
-            # Add metadata
-            duration_ms = int((time.time() - start_time) * 1000)
-            result["duration_ms"] = duration_ms
-            
-            return result
-            
+            llm_response = self.llm.invoke(prompt)
+
+            # Parse JSON
+            parsed = self._parse_json_response(llm_response)
+
+            # Enforce schema
+            parsed = self._normalize_result(parsed)
+
+            parsed["duration_ms"] = int((time.time() - start) * 1000)
+            return parsed
+
         except Exception as e:
-            # Fallback on error
+            # Graceful fallback
             return {
                 "intent": "general_query",
                 "confidence": "low",
-                "reason": f"Error during classification: {str(e)}",
-                "duration_ms": int((time.time() - start_time) * 1000)
+                "reason": f"Router fallback due to error: {str(e)}",
+                "duration_ms": int((time.time() - start) * 1000),
             }
-    
+
+    # ------------------------------------------------------------------
+    # JSON PARSER WITH MULTIPLE FALLBACKS
+    # ------------------------------------------------------------------
     def _parse_json_response(self, response) -> Dict[str, Any]:
-        """Parse LLM JSON response with fallbacks"""
-        # Handle both string and AIMessage
-        if hasattr(response, 'content'):
-            text = response.content
-        else:
-            text = str(response)
-        
+        text = response.content if hasattr(response, "content") else str(response)
+        text = text.strip()
+
+        # 1. Direct strict JSON
         try:
-            # Try direct JSON parse
-            return json.loads(text.strip())
-        except json.JSONDecodeError:
-            # Try to extract JSON from markdown code blocks
-            if "```json" in text:
-                json_str = text.split("```json")[1].split("```")[0].strip()
+            return json.loads(text)
+        except:
+            pass
+
+        # 2. JSON inside ``` blocks
+        if "```" in text:
+            sections = text.split("```")
+            for section in sections:
+                if "{" in section and "}" in section:
+                    try:
+                        json_str = section[section.find("{"): section.rfind("}") + 1]
+                        return json.loads(json_str)
+                    except:
+                        pass
+
+        # 3. First {...} found in response
+        if "{" in text and "}" in text:
+            try:
+                json_str = text[text.find("{"): text.rfind("}") + 1]
                 return json.loads(json_str)
-            elif "```" in text:
-                json_str = text.split("```")[1].split("```")[0].strip()
-                return json.loads(json_str)
-            
-            # Try to find JSON object in text
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start != -1 and end > start:
-                json_str = text[start:end]
-                return json.loads(json_str)
-            
-            # Last resort: return error
-            raise ValueError(f"Could not parse JSON from response: {text[:100]}")
-    
+            except:
+                pass
+
+        raise ValueError(f"Invalid JSON returned by LLM: {text[:160]}")
+
+    # ------------------------------------------------------------------
+    # NORMALIZE RESULT (STRICTER THAN BEFORE)
+    # ------------------------------------------------------------------
+    def _normalize_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        intent = result.get("intent", "general_query")
+        confidence = result.get("confidence", "low")
+        reason = result.get("reason", "")
+
+        # Validate intent
+        if intent not in self.VALID_INTENTS:
+            reason = f"Invalid intent '{intent}' returned. Forced to general_query."
+            intent = "general_query"
+            confidence = "low"
+
+        # Validate confidence
+        confidence = confidence.lower().strip()
+        if confidence not in self.VALID_CONFIDENCE:
+            confidence = "low"
+
+        return {
+            "intent": intent,
+            "confidence": confidence,
+            "reason": reason,
+        }
+
+    # Optional tracker helper
     def format_for_tracker(self, result: Dict[str, Any], user_query: str) -> Dict[str, Any]:
-        """Format result for chain-of-thought tracker"""
         return {
             "step": "Router",
             "duration_ms": result.get("duration_ms", 0),
             "description": (
-                f"Classified as '{result['intent']}' with {result['confidence']} confidence. "
-                f"{result.get('reason', '')}"
+                f"Intent classified as '{result['intent']}' "
+                f"with {result['confidence']} confidence. {result.get('reason', '')}"
             ),
-            "metadata": {
-                "intent": result["intent"],
-                "confidence": result["confidence"],
-                "user_query": user_query
-            }
+            "metadata": result,
         }
-

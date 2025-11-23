@@ -1,510 +1,586 @@
 """
-Enhanced Query Agent with performance tracking
-Executes queries against the real estate dataset
+QueryAgent – Clean and fully patched execution layer
+• No validation (handled earlier)
+• No intent classification
+• Executes the 6 query types in a safe, consistent format
+• Compatible with Formatter, ValidationAgent & NaturalDateAgent
 """
 
 import time
-import sys
-import os
-from typing import Dict, Any
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from data.data_loader import RealEstateDataLoader
+import polars as pl
+from typing import Dict, Any, List
 
 
-class EnhancedQueryAgent:
-    """Executes queries with timing and error handling"""
-    
-    def __init__(self, data_loader: RealEstateDataLoader):
+class QueryAgent:
+    """Executes dataset queries based on validated entities."""
+
+    def __init__(self, data_loader):
         self.data_loader = data_loader
-    
-    def execute_query(
-        self,
-        intent: str,
-        entities: Dict[str, Any]
-    ) -> tuple[Dict[str, Any], float]:
-        """
-        Execute query based on intent and entities
-        
-        Returns:
-            (query_result, duration_ms)
-        """
-        start_time = time.time()
-        print("\n[QUERY] ---- Query agent called ----")        
+
+    # ============================================================
+    # MAIN ENTRY
+    # ============================================================
+    def run(self, intent: str, entities: Dict[str, Any]) -> Dict[str, Any]:
+        start = time.time()
+
         try:
-            # STEP 1: Validate all entities against the dataset
-            # SKIP validation for temporal_comparison (it has different entity structure)
-            if intent != "temporal_comparison":
-                validation = self.data_loader.validate_entities(entities)
-                
-                if not validation["valid"]:
-                    # Build a comprehensive error message
-                    invalid = validation["invalid_entities"]
-                    suggestions = validation["suggestions"]
-                    
-                    error_parts = []
-                    for entity_type, invalid_values in invalid.items():
-                        error_parts.append(f"{entity_type}: {', '.join(map(str, invalid_values))}")
-                    
-                    result = {
-                        "error": f"Invalid entities found: {'; '.join(error_parts)}",
-                        "invalid_entities": invalid,
-                        "suggestions": suggestions
-                    }
-                    
-                    # Add legacy keys for backward compatibility
-                    if "property" in invalid:
-                        result["invalid_properties"] = invalid["property"]
-                        result["available_properties"] = suggestions.get("property", [])
-                    if "tenant" in invalid:
-                        result["invalid_tenants"] = invalid["tenant"]
-                        result["available_tenants"] = suggestions.get("tenant", [])
-                    
-                    duration_ms = (time.time() - start_time) * 1000
-                    return result, duration_ms
-            
-            # STEP 2: Execute the query
             if intent == "property_comparison":
-                result = self._query_comparison(entities)
+                result = self._property_comparison(entities)
+
             elif intent == "temporal_comparison":
-                result = self._query_temporal_comparison(entities)
+                result = self._temporal_comparison(entities)
+
             elif intent == "multi_entity_query":
-                result = self._query_multi_entity(entities)
+                result = self._multi_entity(entities)
+
             elif intent == "pl_calculation":
-                result = self._query_pl(entities)
+                result = self._pnl(entities)
+
             elif intent == "property_details":
-                result = self._query_property_details(entities)
+                result = self._property_details(entities)
+
             elif intent == "tenant_info":
-                result = self._query_tenant_info(entities)
-            elif intent == "general_query":
-                result = self._query_general_info()
+                result = self._tenant_info(entities)
+
+            elif intent == "analytics_query":
+                result = self._analytics_query(entities)
+
             else:
-                result = {"error": "Unsupported query intent"}
-            
-            duration_ms = (time.time() - start_time) * 1000
-            
-            return result, duration_ms
-            
+                result = {"error": f"Unsupported intent '{intent}'"}
+
         except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000
-            result = {"error": f"Query execution failed: {str(e)}"}
-            return result, duration_ms
-    
-    def _query_comparison(self, entities: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute property comparison"""
-        properties = entities.get("properties", [])
-        invalid_properties = entities.get("invalid_properties", [])
-        requested_properties = entities.get("requested_properties", properties)
-        
-        if len(properties) < 2:
-            # Not enough valid properties to perform a comparison
-            # If there are invalid ones, surface them explicitly
-            if invalid_properties:
-                return {
-                    "error": "Need at least 2 valid properties for comparison",
-                    "invalid_properties": invalid_properties,
-                    "available_properties": self.data_loader.get_properties(),
-                    "requested_properties": requested_properties,
-                    "provided": properties,
-                }
-            return {
-                "error": "Need at least 2 properties for comparison",
-                "available_properties": self.data_loader.get_properties(),
-                "provided": properties
-            }
-        
-        # Handle N properties (2 or more)
-        # Get details for each property
-        property_details = []
-        for prop in properties:
-            details = self.data_loader.get_property_details(prop)
-            if "error" in details:
-                return {
-                    "error": f"Property '{prop}' not found in dataset",
-                    "available_properties": self.data_loader.get_properties()
-                }
-            property_details.append(details)
-        
-        # Build comparison result
-        result = {
-            "type": "multi_property_comparison",
-            "properties": properties,
-            "count": len(properties)
-        }
-        
-        # Add each property's data
-        for i, (prop, details) in enumerate(zip(properties, property_details), start=1):
-            result[f"property{i}"] = {
-                "property_name": prop,
-                "total_revenue": details.get("total_revenue", 0),
-                "total_expenses": details.get("total_expenses", 0),
-                "net_profit": details.get("net_profit", 0),
-                "tenants": details.get("tenants", []),
-                "record_count": details.get("record_count", 0)
-            }
-        
-        # Add comparison summary (best performer, rankings)
-        profits = [(prop, details.get("net_profit", 0)) for prop, details in zip(properties, property_details)]
-        profits_sorted = sorted(profits, key=lambda x: x[1], reverse=True)
-        
-        result["ranking"] = [{"property": prop, "net_profit": profit} for prop, profit in profits_sorted]
-        result["best_performer"] = profits_sorted[0][0]
-        result["worst_performer"] = profits_sorted[-1][0]
-        
+            result = {"error": f"QueryAgent failure: {str(e)}"}
+
+        result["duration_ms"] = int((time.time() - start) * 1000)
         return result
-    
-    def _query_multi_entity(self, entities: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute multiple queries and combine results
-        entities = { "sub_queries": [query1_entities, query2_entities, ...] }
-        """
-        if "sub_queries" not in entities:
-            raise ValueError("sub_queries not found in entities")
-        
-        sub_queries = entities["sub_queries"]
-        results = []
-        
-        for i, sub_query in enumerate(sub_queries):
-            query_entities = sub_query["entities"]
-            raw_query = sub_query["raw_query"]
-            
-            # Determine query type and execute
-            if query_entities.get("property") == "all":
-                # PropCo query - calculate P&L for all properties
-                result = self._query_pl(query_entities)
-            elif "year" in query_entities or "quarter" in query_entities or "month" in query_entities:
-                # P&L query
-                result = self._query_pl(query_entities)
-            else:
-                # Property details query
-                result = self._query_property_details(query_entities)
-            
-            results.append({
-                "query_index": i + 1,
-                "raw_query": raw_query,
-                "entities": query_entities,
-                "result": result
-            })
-        
-        return {
-            "type": "multi_entity",
-            "total_queries": len(results),
-            "results": results
-        }
-    
-    def _query_temporal_comparison(self, entities: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute temporal comparison (same property, different periods)"""
-        # Handle both singular and plural keys
-        property_name = entities.get("property")
-        if not property_name and "properties" in entities:
-            props_list = entities.get("properties")
-            if isinstance(props_list, list) and len(props_list) > 0:
-                property_name = props_list[0]  # Take first property
-            elif isinstance(props_list, str):
-                property_name = props_list
-        
-        periods = entities.get("periods", [])
-        years = entities.get("years", [])
-        is_portfolio = entities.get("is_portfolio", False) or property_name is None or property_name.lower() in ["all", "propco"]
-        
-        if len(periods) < 2:
+
+    # ============================================================
+    # PROPERTY COMPARISON
+    # ============================================================
+    def _property_comparison(self, ent: Dict[str, Any]) -> Dict[str, Any]:
+        props = ent.get("properties", [])
+
+        if len(props) < 2:
             return {
-                "error": "Need at least 2 time periods for comparison",
-                "hint": "Please specify two years, quarters, or months (e.g., '2024 vs 2025')"
-            }
-        
-        # Validate property if we are NOT at portfolio level
-        if not is_portfolio and property_name:
-            available = self.data_loader.get_properties()
-            if property_name not in available:
-                return {
-                    "error": f"Property '{property_name}' not found in dataset",
-                    "available_properties": available
-                }
-        
-        # Calculate P&L for each period (NO LIMIT - handle N periods)
-        period_results = {}
-        for period in periods:
-            # Determine if it's year, quarter, or month
-            if len(period) == 4:  # Year (e.g., "2024")
-                pl_data = self.data_loader.calculate_pl(
-                    year=period,
-                    property_name=None if is_portfolio else property_name
-                )
-            elif "-Q" in period:  # Quarter
-                pl_data = self.data_loader.calculate_pl(
-                    quarter=period,
-                    property_name=None if is_portfolio else property_name
-                )
-            elif "-M" in period:  # Month
-                pl_data = self.data_loader.calculate_pl(
-                    month=period,
-                    property_name=None if is_portfolio else property_name
-                )
-            else:
-                continue
-            
-            if "error" not in pl_data:
-                period_results[period] = pl_data
-        
-        if len(period_results) < 2:
-            return {
-                "error": "Could not retrieve data for at least 2 periods",
-                "periods_requested": periods,
-                "periods_found": list(period_results.keys())
-            }
-        
-        # Format comparison result for N periods
-        result = {
-            "type": "temporal_comparison",
-            "property": property_name,
-            "periods": list(period_results.keys()),
-            "count": len(period_results)
-        }
-        
-        # Add each period's data
-        for i, (period, data) in enumerate(period_results.items(), start=1):
-            result[f"period{i}"] = period
-            result[f"period{i}_data"] = {
-                "total_revenue": data.get("total_revenue", 0),
-                "total_expenses": data.get("total_expenses", 0),
-                "net_profit": data.get("net_profit", 0)
-            }
-        
-        # Add ranking by net profit
-        profits = [(period, data.get("net_profit", 0)) for period, data in period_results.items()]
-        profits_sorted = sorted(profits, key=lambda x: x[1], reverse=True)
-        
-        result["ranking"] = [{"period": period, "net_profit": profit} for period, profit in profits_sorted]
-        result["best_period"] = profits_sorted[0][0]
-        result["worst_period"] = profits_sorted[-1][0]
-        
-        return result
-    
-    def _query_pl(self, entities: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute P&L calculation"""
-        year = entities.get("year")
-        quarter = entities.get("quarter")
-        month = entities.get("month")
-        
-        # Normalize quarter: if just "Q1" and we have year, make it "2024-Q1"
-        if quarter and year and quarter.upper() in ["Q1", "Q2", "Q3", "Q4"]:
-            quarter = f"{year}-{quarter.upper()}"
-        
-        # Support both "property" and "properties" (from extractor)
-        property_name = entities.get("property")
-        if not property_name and "properties" in entities:
-            props_list = entities.get("properties")
-            if isinstance(props_list, list) and len(props_list) > 0:
-                property_name = props_list[0]  # Take first property
-            elif isinstance(props_list, str):
-                property_name = props_list
-        
-        metric = entities.get("metric", "pnl")
-        ledger_type = entities.get("ledger_type")
-        ledger_group = entities.get("ledger_group")
-        invalid_properties = entities.get("invalid_properties", [])
-        
-        # Check for invalid properties first
-        if invalid_properties:
-            return {
-                "error": f"Property not found: {', '.join(invalid_properties)}",
-                "invalid_properties": invalid_properties,
+                "error": "Property comparison requires at least 2 properties",
+                "properties": props,
                 "available_properties": self.data_loader.get_properties()
             }
-        
-        # Handle "all" properties (PropCo is portfolio-level)
-        if property_name and property_name.lower() in ["all", "propco"]:
-            property_name = None  # None means all properties
-        
-        # Detect conflicting time ranges (e.g., quarter vs month that don't match)
-        if quarter and month:
-            # month is in format YYYY-MMM, e.g. 2025-M02
-            try:
-                month_code = month.split("-")[1]  # M01, M02, ...
-                month_num = int(month_code.replace("M", ""))
-                if 1 <= month_num <= 3:
-                    inferred_quarter = "Q1"
-                elif 4 <= month_num <= 6:
-                    inferred_quarter = "Q2"
-                elif 7 <= month_num <= 9:
-                    inferred_quarter = "Q3"
-                else:
-                    inferred_quarter = "Q4"
-                inferred_quarter_full = f"{year}-{inferred_quarter}" if year else None
-                if inferred_quarter_full and inferred_quarter_full != quarter:
-                    return {
-                        "error": "Conflicting time ranges: quarter and month do not match. "
-                                 "Please specify a single period, for example '2024-Q3' or '2025-M02'."
-                    }
-            except Exception:
-                # If parsing fails, fall back to normal behaviour
-                pass
-        
-        # Validate property if specified
-        if property_name:
-            available = self.data_loader.get_properties()
-            if property_name not in available:
-                return {
-                    "error": f"Property '{property_name}' not found in dataset",
-                    "available_properties": available
-                }
-        
-        # Delegate base P&L calculation to the data loader
-        base_result = self.data_loader.calculate_pl(
+
+        details = []
+        for p in props:
+            d = self.data_loader.get_property_details(p)
+            details.append({
+                "property": p,
+                "net_profit": d.get("net_profit", 0),
+                "total_revenue": d.get("total_revenue", 0),
+                "total_expenses": d.get("total_expenses", 0),
+                "tenants": d.get("tenants", [])
+            })
+
+        ranking = sorted(details, key=lambda x: x["net_profit"], reverse=True)
+
+        return {
+            "type": "property_comparison",
+            "properties": props,
+            "ranking": ranking,
+            "best_performer": ranking[0]["property"],
+            "worst_performer": ranking[-1]["property"],
+        }
+
+    # ============================================================
+    # TEMPORAL COMPARISON (PATCHED & CLEAN)
+    # ============================================================
+    def _temporal_comparison(self, ent: Dict[str, Any]) -> Dict[str, Any]:
+        # Property from "property" OR "properties"
+        prop = ent.get("property")
+        if not prop and ent.get("properties"):
+            prop = ent["properties"][0]
+
+        periods = ent.get("periods", [])
+
+        if not prop:
+            return {"error": "Missing property for temporal comparison"}
+
+        if len(periods) < 2:
+            return {"error": "Temporal comparison needs ≥ 2 periods"}
+
+        results = {}
+
+        for period in periods:
+            if len(period) == 4:  # YEAR
+                d = self.data_loader.calculate_pl(year=period, property_name=prop)
+
+            elif "-Q" in period:  # QUARTER
+                d = self.data_loader.calculate_pl(quarter=period, property_name=prop)
+
+            elif "-M" in period:  # MONTH
+                d = self.data_loader.calculate_pl(month=period, property_name=prop)
+
+            else:
+                continue
+
+            if "error" not in d:
+                results[period] = d
+
+        if len(results) < 2:
+            return {
+                "error": "missing_period_data",
+                "periods_requested": periods,
+                "periods_found": list(results.keys())
+            }
+
+        # -------- PATCHED FORMAT (Formatter compatible) -------- #
+        ranking_list = sorted(
+            [{"period": p, "net_profit": d.get("net_profit", 0)} for p, d in results.items()],
+            key=lambda x: x["net_profit"],
+            reverse=True
+        )
+
+        return {
+            "type": "temporal_comparison",
+            "property": prop,
+            "periods": list(results.keys()),
+            "ranking": ranking_list,
+            "best_period": ranking_list[0]["period"],
+            "worst_period": ranking_list[-1]["period"],
+            "details": results
+        }
+
+    # ============================================================
+    # MULTI QUERY (PATCHED – supports ALL query types)
+    # ============================================================
+    def _multi_entity(self, ent: Dict[str, Any]) -> Dict[str, Any]:
+        subs = ent.get("sub_queries", []) or []
+        if not subs:
+            return {"error": "No sub-queries provided"}
+
+        output = []
+        for i, sq in enumerate(subs):
+            if not sq or not isinstance(sq, dict):
+                continue
+            e = sq["entities"]
+            raw = sq["raw_query"]
+
+            # ROUTING LOGIC (patched)
+            if "properties" in e and len(e["properties"]) >= 2:
+                r = self._property_comparison(e)
+
+            elif "year" in e or "quarter" in e or "month" in e:
+                r = self._pnl(e)
+
+            elif "property" in e or "properties" in e:
+                r = self._property_details(e)
+
+            elif "tenant" in e or "tenants" in e:
+                r = self._tenant_info(e)
+
+            else:
+                r = {"error": "Unsupported sub-query"}
+
+            output.append({
+                "index": i + 1,
+                "raw_query": raw,
+                "entities": e,
+                "result": r
+            })
+
+        return {
+            "type": "multi_entity",
+            "total_queries": len(output),
+            "results": output
+        }
+
+    # ============================================================
+    # P&L CALCULATION (PATCHED)
+    # ============================================================
+    def _pnl(self, ent: Dict[str, Any]) -> Dict[str, Any]:
+        # Property: support property / properties / portfolio-level
+        prop = ent.get("property")
+        if not prop and ent.get("properties"):
+            # Handle None or empty list
+            props = ent.get("properties")
+            if props and isinstance(props, list) and len(props) > 0:
+                prop = props[0]
+
+        if prop and prop.lower() in ["propco", "all"]:
+            prop = None  # portfolio-level
+
+        metric = ent.get("metric", "pnl")
+        year = ent.get("year")
+        quarter = ent.get("quarter")
+        month = ent.get("month")
+
+        # Normalize quarter: handle both string and list
+        if quarter:
+            # If quarter is a list, take the first one (for pl_calculation, we only need one quarter)
+            if isinstance(quarter, list):
+                quarter = quarter[0] if quarter else None
+            
+            # Normalize quarter Q1 → 2024-Q1 (only if not already formatted)
+            if quarter and year:
+                if isinstance(quarter, str):
+                    # Check if already formatted (e.g., "2024-Q1")
+                    if "-" not in quarter and quarter.upper() in ["Q1", "Q2", "Q3", "Q4"]:
+                        quarter = f"{year}-{quarter.upper()}"
+                    elif "-" in quarter:
+                        # Already formatted, use as is
+                        pass
+
+        # Safety check: if no property and no filters, return error
+        if not prop and not year and not quarter and not month:
+            return {"error": "no_financial_data", "message": "No property or timeframe specified"}
+
+        df = self.data_loader.df
+        df = df.filter(df["property_name"] == prop) if prop else df
+        df = df.filter(df["year"] == str(year)) if year else df
+        df = df.filter(df["quarter"] == quarter) if quarter else df
+        df = df.filter(df["month"] == month) if month else df
+
+        if df.is_empty():
+            return {"error": "no_financial_data"}
+
+        base = self.data_loader.calculate_pl(
             year=year,
             quarter=quarter,
             month=month,
-            property_name=property_name
+            property_name=prop
         )
 
-        # If there was an error or we don't need metric-level filtering, return as-is
-        if "error" in base_result:
-            return base_result
+        if "error" in base:
+            return base
 
-        # By default, calculate_pl already returns aggregated revenue, expenses and net_profit.
-        # We adjust this based on the inferred "metric"/ledger filters to align with
-        # the user's requested type of information.
-        result: Dict[str, Any] = {
-            **base_result,
-            "metric": metric,
-        }
-
-        # If the user asked specifically for expenses only
+        # --- Metric filtering (Expenses / Revenue / Rent / Parking) ---
         if metric == "expenses":
-            # Keep total_expenses and zero out revenue/net profit to make intent explicit
-            result["total_revenue"] = 0.0
-            result["net_profit"] = -base_result.get("total_expenses", 0.0)
-            return result
+            return {
+                "metric": "expenses",
+                "total_expenses": base["total_expenses"],
+                "net_profit": -base["total_expenses"],
+                "property": prop,
+                "year": year,
+                "quarter": quarter,
+                "month": month
+            }
 
-        # If the user asked for revenue-only style metrics (revenue, rent income, parking income)
         if metric in ["revenue", "rent_income", "parking_income"]:
-            # We recompute revenue from the detailed breakdown based on ledger filters,
-            # and do not focus on expenses in the numeric summary.
-            revenue_breakdown = base_result.get("revenue_breakdown", [])
-            filtered_revenue = 0.0
-
+            rev = 0
+            revenue_breakdown = base.get("revenue_breakdown", []) or []
             for row in revenue_breakdown:
-                category = str(row.get("ledger_category", "")).lower()
-                group = str(row.get("ledger_group", "")).lower() if "ledger_group" in row else ""
-                amount = float(row.get("amount", 0.0))
+                if not isinstance(row, dict):
+                    continue
+                cat = row.get("ledger_category", "").lower()
+                group = row.get("ledger_group", "").lower()
+                amt = row.get("amount", 0)
 
-                if metric == "rent_income":
-                    # Focus on rental income categories (main rent flows)
-                    if "rental_income" in group or "revenue_rent_taxed" in category or "rent" in category:
-                        filtered_revenue += amount
-                elif metric == "parking_income":
-                    # Focus on parking-related revenue.
-                    # Here we interpret "parking income" as the main taxed parking proceeds.
-                    if "proceeds_parking_taxed" in category:
-                        filtered_revenue += amount
-                else:
-                    # Generic revenue metric: sum all revenue categories
-                    filtered_revenue += amount
+                if metric == "rent_income" and ("rental" in group or "rent" in cat):
+                    rev += amt
 
-            # If we couldn't filter specifically (e.g. missing breakdown info), fall back to total_revenue
-            if filtered_revenue == 0.0:
-                filtered_revenue = base_result.get("total_revenue", 0.0)
+                elif metric == "parking_income" and "parking" in cat:
+                    rev += amt
 
-            result["total_revenue"] = round(filtered_revenue, 2)
-            # For revenue-type questions, set net_profit equal to revenue when expenses aren't the focus
-            result["net_profit"] = result["total_revenue"]
-            return result
+                elif metric == "revenue":
+                    rev += amt
 
-        # Default: full P&L metric (pnl or unknown)
-        return result
-    
-    def _query_property_details(self, entities: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute property details query"""
-        # Support both "property" and "properties" (from extractor)
-        property_name = entities.get("property")
-        if not property_name and "properties" in entities:
-            props_list = entities.get("properties")
-            if isinstance(props_list, list) and len(props_list) > 0:
-                property_name = props_list[0]  # Take first property
-            elif isinstance(props_list, str):
-                property_name = props_list
-        
-        invalid_properties = entities.get("invalid_properties", [])
-        
-        if not property_name:
-            # Check if there was an invalid property request
-            if invalid_properties:
-                return {
-                    "error": f"Property not found: {', '.join(invalid_properties)}",
-                    "invalid_properties": invalid_properties,
-                    "available_properties": self.data_loader.get_properties()
-                }
+            if rev == 0:
+                rev = base.get("total_revenue", 0)
+
             return {
-                "error": "No property specified",
-                "available_properties": self.data_loader.get_properties()
+                "metric": metric,
+                "total_revenue": rev,
+                "net_profit": rev,
+                "property": prop,
+                "year": year,
+                "quarter": quarter,
+                "month": month
+            }
+
+        # Default P&L
+        base["property"] = prop
+        base["year"] = year
+        base["quarter"] = quarter
+        base["month"] = month
+        return base
+
+    # ============================================================
+    # PROPERTY DETAILS
+    # ============================================================
+    def _property_details(self, ent: Dict[str, Any]) -> Dict[str, Any]:
+        prop = ent.get("property")
+        if not prop and ent.get("properties"):
+            prop = ent["properties"][0]
+
+        if not prop:
+            return {"error": "No property specified"}
+
+        info = self.data_loader.get_property_details(prop)
+
+        years = sorted(self.data_loader.df.filter(
+            self.data_loader.df["property_name"] == prop
+        )["year"].unique().to_list())
+
+        info["available_years"] = years
+        return info
+
+    # ============================================================
+    # TENANT DETAILS
+    # ============================================================
+    def _tenant_info(self, ent: Dict[str, Any]) -> Dict[str, Any]:
+        # Special case: "Show me the tenants for Building X" - query by property
+        property_name = ent.get("property") or (ent.get("properties", [None])[0] if ent.get("properties") else None)
+        
+        if property_name:
+            # Get tenants for a property
+            info = self.data_loader.get_property_details(property_name)
+            if "error" in info:
+                return info
+            return {
+                "property": property_name,
+                "tenants": info.get("tenants", []),
+                "total_revenue": info.get("total_revenue", 0),
+                "total_expenses": info.get("total_expenses", 0),
+                "net_profit": info.get("net_profit", 0)
             }
         
-        # Validate property
-        available = self.data_loader.get_properties()
-        if property_name not in available:
-            return {
-                "error": f"Property '{property_name}' not found in dataset",
-                "available_properties": available
-            }
-        
-        result = self.data_loader.get_property_details(property_name)
-        return result
-    
-    def _query_tenant_info(self, entities: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute tenant information query"""
-        # Support both "tenant" and "tenants" (from extractor)
-        tenant = entities.get("tenant")
-        if not tenant and "tenants" in entities:
-            tenants_list = entities.get("tenants")
-            if isinstance(tenants_list, list) and len(tenants_list) > 0:
-                tenant = tenants_list[0]  # Take first tenant
-            elif isinstance(tenants_list, str):
-                tenant = tenants_list
-        
-        invalid_tenants = entities.get("invalid_tenants", [])
-        
+        # Original logic: query by tenant
+        tenant = ent.get("tenant")
+        if not tenant and ent.get("tenants"):
+            tenant = ent["tenants"][0]
+
         if not tenant:
-            # Check if there was an invalid tenant request
-            if invalid_tenants:
-                return {
-                    "error": f"Tenant not found: {', '.join(invalid_tenants)}",
-                    "invalid_tenants": invalid_tenants,
-                    "available_tenants": self.data_loader.get_tenants()
-                }
-            return {
-                "info": "Available tenants",
-                "tenants": self.data_loader.get_tenants()
-            }
-        
-        # Filter for tenant
-        tenant_data = self.data_loader.df.filter(
+            return {"error": "No tenant or property specified"}
+
+        df = self.data_loader.df.filter(
             self.data_loader.df["tenant_name"] == tenant
         )
-        
-        if len(tenant_data) == 0:
-            return {
-                "error": f"No data found for {tenant}",
-                "available_tenants": self.data_loader.get_tenants()
-            }
-        
-        # Calculate stats
-        total_revenue = tenant_data.filter(
-            tenant_data["ledger_type"] == "revenue"
-        )["profit"].sum()
-        
-        properties = tenant_data["property_name"].unique().drop_nulls().to_list()
-        
+
+        if df.is_empty():
+            return {"error": f"No data for tenant '{tenant}'"}
+
+        revenue = df.filter(df["ledger_type"] == "revenue")["profit"].sum()
+        props = df["property_name"].unique().to_list()
+
         return {
             "tenant": tenant,
-            "properties": properties,
-            "total_revenue": round(total_revenue, 2),
-            "record_count": len(tenant_data)
+            "properties": props,
+            "total_revenue": float(revenue),
+            "record_count": len(df)
         }
-    
-    def _query_general_info(self) -> Dict[str, Any]:
-        """Return general dataset information"""
-        return self.data_loader.get_data_summary()
 
+    # ============================================================
+    # ANALYTICS QUERY
+    # ============================================================
+    def _analytics_query(self, ent: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle analytics queries: list, max, min, top, etc."""
+        operation = ent.get("operation", "list")
+        user_query = ent.get("raw_query", "").lower() if isinstance(ent.get("raw_query"), str) else ""
+        
+        try:
+            # For max/min/top queries - IMPLEMENT RANKING
+            if operation in ["max", "min", "top", "highest", "lowest", "most"]:
+                # Check if query is about categories FIRST (more specific - "expense category")
+                if "categor" in user_query or ("expense" in user_query and ("category" in user_query or "lowest" in user_query or "highest" in user_query)):
+                    return self._rank_expense_categories(ent, operation)
+                # Check if query is about properties (which property made the most profit/highest revenue)
+                elif "propert" in user_query or "building" in user_query:
+                    return self._rank_properties_by_profit(ent, operation)
+                # Generic error for unsupported ranking
+                return {
+                    "error": f"Ranking queries ({operation}) for this entity type are not yet fully supported.",
+                    "operation": operation
+                }
+            
+            # Determine what to list/analyze based on query content (only for "list" operation)
+            # List all properties
+            if "propert" in user_query or ("building" in user_query and "tenant" not in user_query):
+                props = self.data_loader.get_properties()
+                return {
+                    "type": "list",
+                    "items": props if props else [],
+                    "count": len(props) if props else 0,
+                    "operation": operation
+                }
+            
+            # List all tenants
+            if "tenant" in user_query:
+                tenants = self.data_loader.get_tenants()
+                return {
+                    "type": "list",
+                    "items": tenants if tenants else [],
+                    "count": len(tenants) if tenants else 0,
+                    "operation": operation
+                }
+            
+            # Default: return available properties
+            props = self.data_loader.get_properties()
+            return {
+                "type": "list",
+                "items": props if props else [],
+                "count": len(props) if props else 0,
+                "operation": operation,
+                "note": "Defaulting to properties list"
+            }
+        except Exception as e:
+            return {
+                "error": f"Error in analytics query: {str(e)}",
+                "operation": operation
+            }
+
+    # ============================================================
+    # RANKING HELPERS
+    # ============================================================
+    def _rank_properties_by_profit(self, ent: Dict[str, Any], operation: str) -> Dict[str, Any]:
+        """Rank properties by profit or revenue (max/min/highest/lowest)."""
+        year = ent.get("year")
+        quarter = ent.get("quarter")
+        month = ent.get("month")
+        user_query = ent.get("raw_query", "").lower() if isinstance(ent.get("raw_query"), str) else ""
+        
+        # Determine sort metric: revenue or profit
+        sort_by_revenue = "revenue" in user_query and "profit" not in user_query
+        
+        # Normalize year if it's a list
+        if isinstance(year, list):
+            year = year[0] if year else None
+        elif year:
+            year = str(year)
+        
+        # Normalize quarter format
+        if quarter and year:
+            if isinstance(quarter, list):
+                quarter = quarter[0] if quarter else None
+            if isinstance(quarter, str):
+                if "-" not in quarter and quarter.upper() in ["Q1", "Q2", "Q3", "Q4"]:
+                    quarter = f"{year}-{quarter.upper()}"
+        
+        # Get all properties
+        all_properties = self.data_loader.get_properties()
+        
+        if not all_properties:
+            return {
+                "error": "No properties found in dataset",
+                "operation": operation
+            }
+        
+        # Calculate P&L for each property
+        rankings = []
+        for prop in all_properties:
+            pl_result = self.data_loader.calculate_pl(
+                year=year,
+                quarter=quarter,
+                month=month,
+                property_name=prop
+            )
+            
+            if "error" not in pl_result:
+                rankings.append({
+                    "property": prop,
+                    "net_profit": pl_result.get("net_profit", 0),
+                    "total_revenue": pl_result.get("total_revenue", 0),
+                    "total_expenses": pl_result.get("total_expenses", 0)
+                })
+        
+        if not rankings:
+            return {
+                "error": "no_financial_data",
+                "message": f"No financial data found for the specified period",
+                "operation": operation
+            }
+        
+        # Sort by revenue or profit (descending for max/highest/most, ascending for min/lowest)
+        reverse = operation in ["max", "highest", "most", "top"]
+        sort_key = "total_revenue" if sort_by_revenue else "net_profit"
+        rankings.sort(key=lambda x: x[sort_key], reverse=reverse)
+        
+        # Return top result for max/min, or top N for "top"
+        if operation == "top":
+            # Default to top 3, or extract number from query if possible
+            top_n = 3
+            return {
+                "type": "ranking",
+                "operation": operation,
+                "rankings": rankings[:top_n],
+                "count": len(rankings[:top_n]),
+                "total_properties": len(rankings)
+            }
+        else:
+            # Return the top/bottom property
+            top_result = rankings[0]
+            return {
+                "type": "ranking",
+                "operation": operation,
+                "property": top_result["property"],
+                "net_profit": top_result["net_profit"],
+                "total_revenue": top_result["total_revenue"],
+                "total_expenses": top_result["total_expenses"],
+                "rankings": rankings[:5] if len(rankings) > 1 else [top_result]  # Include top 5 for context
+            }
+
+    def _rank_expense_categories(self, ent: Dict[str, Any], operation: str) -> Dict[str, Any]:
+        """Rank expense categories by amount (highest/lowest)."""
+        year = ent.get("year")
+        quarter = ent.get("quarter")
+        month = ent.get("month")
+        property_name = ent.get("property") or (ent.get("properties", [None])[0] if ent.get("properties") else None)
+        
+        # Handle PropCo/portfolio-level (treat as None)
+        if property_name and property_name.lower() in ["propco", "portfolio", "all properties", "all buildings"]:
+            property_name = None
+        
+        # Normalize year if it's a list
+        if isinstance(year, list):
+            year = year[0] if year else None
+        elif year:
+            year = str(year)
+        
+        # Normalize quarter format
+        if quarter and year:
+            if isinstance(quarter, list):
+                quarter = quarter[0] if quarter else None
+            if isinstance(quarter, str):
+                if "-" not in quarter and quarter.upper() in ["Q1", "Q2", "Q3", "Q4"]:
+                    quarter = f"{year}-{quarter.upper()}"
+        
+        # Filter data
+        df = self.data_loader.df
+        if property_name:
+            df = df.filter(pl.col("property_name") == property_name)
+        if year:
+            df = df.filter(pl.col("year") == str(year))
+        if quarter:
+            df = df.filter(pl.col("quarter") == quarter)
+        if month:
+            df = df.filter(pl.col("month") == month)
+        
+        # Filter expenses only
+        exp_df = df.filter(pl.col("ledger_type") == "expenses")
+        
+        if exp_df.is_empty():
+            return {
+                "error": "no_financial_data",
+                "message": "No expense data found for the specified period",
+                "operation": operation
+            }
+        
+        # Group by category and sum
+        category_totals = (
+            exp_df
+            .group_by("ledger_category")
+            .agg(pl.col("profit").abs().sum().alias("total_amount"))
+            .sort("total_amount", descending=(operation in ["max", "highest", "most"]))
+            .to_dicts()
+        )
+        
+        if not category_totals:
+            return {
+                "error": "no_financial_data",
+                "operation": operation
+            }
+        
+        top_category = category_totals[0]
+        return {
+            "type": "ranking",
+            "operation": operation,
+            "category": top_category["ledger_category"],
+            "total_amount": float(top_category["total_amount"]),
+            "top_categories": category_totals[:5]  # Include top 5 for context
+        }
