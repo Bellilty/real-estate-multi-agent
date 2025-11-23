@@ -14,6 +14,7 @@ if [ ! -d "venv" ]; then
     exit 1
 fi
 
+
 # Activate venv
 source venv/bin/activate
 
