@@ -1,12 +1,12 @@
-# Virtual Real Estate Asset Manager - Multi-Agent System
+# Real Estate Asset Manager - Multi-Agent System
 
 A sophisticated AI-powered real estate asset management system using LangGraph for multi-agent orchestration. The system processes natural language queries about real estate data and provides transparent reasoning with intelligent error handling.
 
-## 🏗️ Project Overview
+## Project Overview
 
-This project implements a Virtual Real Estate Asset Manager that can answer complex questions about real estate data using natural language. The system uses a multi-agent architecture with LangGraph, where specialized agents handle different aspects of query processing: intent classification, entity extraction, validation, date normalization, disambiguation, query execution, and response formatting.
+This project implements a Real Estate Asset Manager that can answer complex questions about real estate data using natural language. The system uses a multi-agent architecture with LangGraph, where specialized agents handle different aspects of query processing: intent classification, entity extraction, validation, date normalization, disambiguation, query execution, and response formatting.
 
-## 📊 Dataset
+## Dataset
 
 - **Source**: `data/cortex.parquet` file containing 3,924 real estate records
 - **Schema**:
@@ -64,9 +64,6 @@ The application will open in your browser at `http://localhost:8501`
 # Verify key is set
 echo $OPENAI_API_KEY
 
-# Common mistake: Wrong variable name
-❌ export OPEN_API_KEY='your-key'    # Wrong
-✅ export OPENAI_API_KEY='your-key'  # Correct
 ```
 
 #### 2. Port Already in Use
@@ -84,7 +81,7 @@ The `cortex.parquet` file should be in:
 
 - `data/cortex.parquet` (relative to project root)
 
-## 🎯 Key Features
+##  Features
 
 ### 1. Multi-Agent Architecture
 
@@ -533,7 +530,7 @@ If I had more time, I would implement:
 
 ## 🧠 Design Strategy and Approach
 
-When I started working on this Real Estate Asset Manager, my main goal was to create a system that could handle natural language queries about real estate data with high accuracy and transparency. I chose a multi-agent architecture using LangGraph because it allows for specialized agents, each handling a specific aspect of query processing, while maintaining clear separation of concerns.
+When I started working on this Project, my main goal was to create a system that could handle natural language queries about real estate data with high accuracy and transparency. I chose a multi-agent architecture using LangGraph because it allows for specialized agents, each handling a specific aspect of query processing, while maintaining clear separation of concerns.
 
 ### Key Design Philosophy
 
@@ -549,7 +546,7 @@ When I started working on this Real Estate Asset Manager, my main goal was to cr
 
 ### Technical Choices
 
-- **LangGraph over LangChain Agents**: Chose LangGraph for explicit workflow control and conditional routing, which is essential for the multi-agent architecture.
+- **LangGraph**: Chose LangGraph for explicit workflow control and conditional routing, which is essential for the multi-agent architecture.
 
 - **Polars over Pandas**: Selected Polars for its superior performance on large datasets and vectorized operations, which is crucial for real-time query processing.
 
